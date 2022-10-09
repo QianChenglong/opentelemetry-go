@@ -16,16 +16,13 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
-
-	"github.com/go-logr/stdr"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/example/namedtracer/foo"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/exporters/stdout"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -39,10 +36,12 @@ var (
 var tp *sdktrace.TracerProvider
 
 // initTracer creates and registers trace provider instance.
-func initTracer() error {
-	exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+func initTracer() {
+	var err error
+	exp, err := stdout.NewExporter(stdout.WithPrettyPrint())
 	if err != nil {
-		return fmt.Errorf("failed to initialize stdouttrace exporter: %w", err)
+		log.Panicf("failed to initialize stdout exporter %v\n", err)
+		return
 	}
 	bsp := sdktrace.NewBatchSpanProcessor(exp)
 	tp = sdktrace.NewTracerProvider(
@@ -50,27 +49,17 @@ func initTracer() error {
 		sdktrace.WithSpanProcessor(bsp),
 	)
 	otel.SetTracerProvider(tp)
-	return nil
 }
 
 func main() {
-	// Set logging level to info to see SDK status messages
-	stdr.SetVerbosity(5)
-
 	// initialize trace provider.
-	if err := initTracer(); err != nil {
-		log.Panic(err)
-	}
+	initTracer()
 
 	// Create a named tracer with package path as its name.
 	tracer := tp.Tracer("example/namedtracer/main")
 	ctx := context.Background()
 	defer func() { _ = tp.Shutdown(ctx) }()
-
-	m0, _ := baggage.NewMember(string(fooKey), "foo1")
-	m1, _ := baggage.NewMember(string(barKey), "bar1")
-	b, _ := baggage.New(m0, m1)
-	ctx = baggage.ContextWithBaggage(ctx, b)
+	ctx = baggage.ContextWithValues(ctx, fooKey.String("foo1"), barKey.String("bar1"))
 
 	var span trace.Span
 	ctx, span = tracer.Start(ctx, "operation")

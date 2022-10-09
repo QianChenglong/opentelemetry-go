@@ -28,7 +28,7 @@ import (
 
 func TestBuiltinStringDetector(t *testing.T) {
 	E := fmt.Errorf("no K")
-	res, err := resource.StringDetector("", attribute.Key("K"), func() (string, error) {
+	res, err := resource.StringDetector(attribute.Key("K"), func() (string, error) {
 		return "", E
 	}).Detect(context.Background())
 	require.True(t, errors.Is(err, E))
@@ -44,14 +44,14 @@ func TestStringDetectorErrors(t *testing.T) {
 	}{
 		{
 			desc: "explicit error from func should be returned",
-			s: resource.StringDetector("", attribute.Key("K"), func() (string, error) {
-				return "", fmt.Errorf("k-is-missing")
+			s: resource.StringDetector(attribute.Key("K"), func() (string, error) {
+				return "", fmt.Errorf("K-IS-MISSING")
 			}),
-			errContains: "k-is-missing",
+			errContains: "K-IS-MISSING",
 		},
 		{
 			desc: "empty key is an invalid",
-			s: resource.StringDetector("", attribute.Key(""), func() (string, error) {
+			s: resource.StringDetector(attribute.Key(""), func() (string, error) {
 				return "not-empty", nil
 			}),
 			errContains: "invalid attribute: \"\" -> \"not-empty\"",
@@ -61,6 +61,7 @@ func TestStringDetectorErrors(t *testing.T) {
 	for _, test := range tests {
 		res, err := resource.New(
 			context.Background(),
+			resource.WithoutBuiltin(),
 			resource.WithAttributes(attribute.String("A", "B")),
 			resource.WithDetectors(test.s),
 		)
@@ -74,4 +75,5 @@ func TestStringDetectorErrors(t *testing.T) {
 		}
 		require.EqualValues(t, map[string]string{"A": "B"}, m)
 	}
+
 }

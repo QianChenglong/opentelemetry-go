@@ -26,15 +26,16 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/instrument"
-	"go.opentelemetry.io/otel/metric/instrument/asyncint64"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/aggregator"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/processor/processortest"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
+	"go.opentelemetry.io/otel/sdk/resource"
 )
+
+var Must = metric.Must
+var testResource = resource.NewWithAttributes(attribute.String("R", "V"))
 
 type handler struct {
 	sync.Mutex
@@ -68,36 +69,50 @@ func init() {
 	otel.SetErrorHandler(testHandler)
 }
 
+// correctnessProcessor could be replaced with processortest.Processor
+// with a non-default aggregator selector.  TODO(#872) use the
+// processortest code here.
+type correctnessProcessor struct {
+	t *testing.T
+	*testSelector
+
+	accumulations []export.Accumulation
+}
+
 type testSelector struct {
 	selector    export.AggregatorSelector
 	newAggCount int
 }
 
-func (ts *testSelector) AggregatorFor(desc *sdkapi.Descriptor, aggPtrs ...*aggregator.Aggregator) {
+func (ts *testSelector) AggregatorFor(desc *metric.Descriptor, aggPtrs ...*export.Aggregator) {
 	ts.newAggCount += len(aggPtrs)
 	processortest.AggregatorSelector().AggregatorFor(desc, aggPtrs...)
 }
 
-func newSDK(t *testing.T) (metric.Meter, *metricsdk.Accumulator, *testSelector, *processortest.Processor) {
+func newSDK(t *testing.T) (metric.Meter, *metricsdk.Accumulator, *correctnessProcessor) {
 	testHandler.Reset()
-	testSelector := &testSelector{selector: processortest.AggregatorSelector()}
-	processor := processortest.NewProcessor(
-		testSelector,
-		attribute.DefaultEncoder(),
-	)
+	processor := &correctnessProcessor{
+		t:            t,
+		testSelector: &testSelector{selector: processortest.AggregatorSelector()},
+	}
 	accum := metricsdk.NewAccumulator(
 		processor,
+		testResource,
 	)
-	meter := sdkapi.WrapMeterImpl(accum)
-	return meter, accum, testSelector, processor
+	meter := metric.WrapMeterImpl(accum, "test")
+	return meter, accum, processor
+}
+
+func (ci *correctnessProcessor) Process(accumulation export.Accumulation) error {
+	ci.accumulations = append(ci.accumulations, accumulation)
+	return nil
 }
 
 func TestInputRangeCounter(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	counter, err := meter.SyncInt64().Counter("name.sum")
-	require.NoError(t, err)
+	counter := Must(meter).NewInt64Counter("name.sum")
 
 	counter.Add(ctx, -1)
 	require.Equal(t, aggregation.ErrNegativeInput, testHandler.Flush())
@@ -105,22 +120,21 @@ func TestInputRangeCounter(t *testing.T) {
 	checkpointed := sdk.Collect(ctx)
 	require.Equal(t, 0, checkpointed)
 
-	processor.Reset()
+	processor.accumulations = nil
 	counter.Add(ctx, 1)
 	checkpointed = sdk.Collect(ctx)
-	require.Equal(t, map[string]float64{
-		"name.sum//": 1,
-	}, processor.Values())
+	sum, err := processor.accumulations[0].Aggregator().(aggregation.Sum).Sum()
+	require.Equal(t, int64(1), sum.AsInt64())
 	require.Equal(t, 1, checkpointed)
+	require.Nil(t, err)
 	require.Nil(t, testHandler.Flush())
 }
 
 func TestInputRangeUpDownCounter(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	counter, err := meter.SyncInt64().UpDownCounter("name.sum")
-	require.NoError(t, err)
+	counter := Must(meter).NewInt64UpDownCounter("name.sum")
 
 	counter.Add(ctx, -1)
 	counter.Add(ctx, -1)
@@ -128,71 +142,67 @@ func TestInputRangeUpDownCounter(t *testing.T) {
 	counter.Add(ctx, 1)
 
 	checkpointed := sdk.Collect(ctx)
-	require.Equal(t, map[string]float64{
-		"name.sum//": 1,
-	}, processor.Values())
+	sum, err := processor.accumulations[0].Aggregator().(aggregation.Sum).Sum()
+	require.Equal(t, int64(1), sum.AsInt64())
 	require.Equal(t, 1, checkpointed)
+	require.Nil(t, err)
 	require.Nil(t, testHandler.Flush())
 }
 
-func TestInputRangeHistogram(t *testing.T) {
+func TestInputRangeValueRecorder(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	histogram, err := meter.SyncFloat64().Histogram("name.histogram")
-	require.NoError(t, err)
+	valuerecorder := Must(meter).NewFloat64ValueRecorder("name.exact")
 
-	histogram.Record(ctx, math.NaN())
+	valuerecorder.Record(ctx, math.NaN())
 	require.Equal(t, aggregation.ErrNaNInput, testHandler.Flush())
 
 	checkpointed := sdk.Collect(ctx)
 	require.Equal(t, 0, checkpointed)
 
-	histogram.Record(ctx, 1)
-	histogram.Record(ctx, 2)
+	valuerecorder.Record(ctx, 1)
+	valuerecorder.Record(ctx, 2)
 
-	processor.Reset()
+	processor.accumulations = nil
 	checkpointed = sdk.Collect(ctx)
 
-	require.Equal(t, map[string]float64{
-		"name.histogram//": 3,
-	}, processor.Values())
+	count, err := processor.accumulations[0].Aggregator().(aggregation.Count).Count()
+	require.Equal(t, uint64(2), count)
 	require.Equal(t, 1, checkpointed)
 	require.Nil(t, testHandler.Flush())
+	require.Nil(t, err)
 }
 
 func TestDisabledInstrument(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	histogram, err := meter.SyncFloat64().Histogram("name.disabled")
-	require.NoError(t, err)
+	valuerecorder := Must(meter).NewFloat64ValueRecorder("name.disabled")
 
-	histogram.Record(ctx, -1)
+	valuerecorder.Record(ctx, -1)
 	checkpointed := sdk.Collect(ctx)
 
 	require.Equal(t, 0, checkpointed)
-	require.Equal(t, map[string]float64{}, processor.Values())
+	require.Equal(t, 0, len(processor.accumulations))
 }
 
 func TestRecordNaN(t *testing.T) {
 	ctx := context.Background()
-	meter, _, _, _ := newSDK(t)
+	meter, _, _ := newSDK(t)
 
-	c, err := meter.SyncFloat64().Counter("name.sum")
-	require.NoError(t, err)
+	c := Must(meter).NewFloat64Counter("name.sum")
 
 	require.Nil(t, testHandler.Flush())
 	c.Add(ctx, math.NaN())
 	require.Error(t, testHandler.Flush())
 }
 
-func TestSDKAttrsDeduplication(t *testing.T) {
+func TestSDKLabelsDeduplication(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	counter, err := meter.SyncInt64().Counter("name.sum")
-	require.NoError(t, err)
+	counter := Must(meter).NewInt64Counter("name.sum")
 
 	const (
 		maxKeys = 21
@@ -207,8 +217,9 @@ func TestSDKAttrsDeduplication(t *testing.T) {
 		keysB = append(keysB, attribute.Key(fmt.Sprintf("B%03d", i)))
 	}
 
-	allExpect := map[string]float64{}
+	var allExpect [][]attribute.KeyValue
 	for numKeys := 0; numKeys < maxKeys; numKeys++ {
+
 		var kvsA []attribute.KeyValue
 		var kvsB []attribute.KeyValue
 		for r := 0; r < repeats; r++ {
@@ -227,31 +238,37 @@ func TestSDKAttrsDeduplication(t *testing.T) {
 
 		counter.Add(ctx, 1, kvsA...)
 		counter.Add(ctx, 1, kvsA...)
-		format := func(attrs []attribute.KeyValue) string {
-			str := attribute.DefaultEncoder().Encode(newSetIter(attrs...))
-			return fmt.Sprint("name.sum/", str, "/")
-		}
-		allExpect[format(expectA)] += 2
+		allExpect = append(allExpect, expectA)
 
 		if numKeys != 0 {
 			// In this case A and B sets are the same.
 			counter.Add(ctx, 1, kvsB...)
 			counter.Add(ctx, 1, kvsB...)
-			allExpect[format(expectB)] += 2
+			allExpect = append(allExpect, expectB)
 		}
+
 	}
 
 	sdk.Collect(ctx)
 
-	require.EqualValues(t, allExpect, processor.Values())
+	var actual [][]attribute.KeyValue
+	for _, rec := range processor.accumulations {
+		sum, _ := rec.Aggregator().(aggregation.Sum).Sum()
+		require.Equal(t, sum, number.NewInt64Number(2))
+
+		kvs := rec.Labels().ToSlice()
+		actual = append(actual, kvs)
+	}
+
+	require.ElementsMatch(t, allExpect, actual)
 }
 
 func newSetIter(kvs ...attribute.KeyValue) attribute.Iterator {
-	attrs := attribute.NewSet(kvs...)
-	return attrs.Iter()
+	labels := attribute.NewSet(kvs...)
+	return labels.Iter()
 }
 
-func TestDefaultAttributeEncoder(t *testing.T) {
+func TestDefaultLabelEncoder(t *testing.T) {
 	encoder := attribute.DefaultEncoder()
 
 	encoded := encoder.Encode(newSetIter(attribute.String("A", "B"), attribute.String("C", "D")))
@@ -263,8 +280,8 @@ func TestDefaultAttributeEncoder(t *testing.T) {
 	encoded = encoder.Encode(newSetIter(attribute.String(`\`, `=`), attribute.String(`,`, `\`)))
 	require.Equal(t, `\,=\\,\\=\=`, encoded)
 
-	// Note: the attr encoder does not sort or de-dup values,
-	// that is done in Attributes(...).
+	// Note: the label encoder does not sort or de-dup values,
+	// that is done in Labels(...).
 	encoded = encoder.Encode(newSetIter(
 		attribute.Int("I", 1),
 		attribute.Int64("I64", 1),
@@ -278,146 +295,104 @@ func TestDefaultAttributeEncoder(t *testing.T) {
 
 func TestObserverCollection(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 	mult := 1
 
-	gaugeF, err := meter.AsyncFloat64().Gauge("float.gauge.lastvalue")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		gaugeF,
-	}, func(ctx context.Context) {
-		gaugeF.Observe(ctx, float64(mult), attribute.String("A", "B"))
+	_ = Must(meter).NewFloat64ValueObserver("float.valueobserver.lastvalue", func(_ context.Context, result metric.Float64ObserverResult) {
+		result.Observe(float64(mult), attribute.String("A", "B"))
 		// last value wins
-		gaugeF.Observe(ctx, float64(-mult), attribute.String("A", "B"))
-		gaugeF.Observe(ctx, float64(-mult), attribute.String("C", "D"))
+		result.Observe(float64(-mult), attribute.String("A", "B"))
+		result.Observe(float64(-mult), attribute.String("C", "D"))
 	})
-	require.NoError(t, err)
-
-	gaugeI, err := meter.AsyncInt64().Gauge("int.gauge.lastvalue")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		gaugeI,
-	}, func(ctx context.Context) {
-		gaugeI.Observe(ctx, int64(-mult), attribute.String("A", "B"))
-		gaugeI.Observe(ctx, int64(mult))
+	_ = Must(meter).NewInt64ValueObserver("int.valueobserver.lastvalue", func(_ context.Context, result metric.Int64ObserverResult) {
+		result.Observe(int64(-mult), attribute.String("A", "B"))
+		result.Observe(int64(mult))
 		// last value wins
-		gaugeI.Observe(ctx, int64(mult), attribute.String("A", "B"))
-		gaugeI.Observe(ctx, int64(mult))
+		result.Observe(int64(mult), attribute.String("A", "B"))
+		result.Observe(int64(mult))
 	})
-	require.NoError(t, err)
 
-	counterF, err := meter.AsyncFloat64().Counter("float.counterobserver.sum")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		counterF,
-	}, func(ctx context.Context) {
-		counterF.Observe(ctx, float64(mult), attribute.String("A", "B"))
-		counterF.Observe(ctx, float64(2*mult), attribute.String("A", "B"))
-		counterF.Observe(ctx, float64(mult), attribute.String("C", "D"))
+	_ = Must(meter).NewFloat64SumObserver("float.sumobserver.sum", func(_ context.Context, result metric.Float64ObserverResult) {
+		result.Observe(float64(mult), attribute.String("A", "B"))
+		result.Observe(float64(2*mult), attribute.String("A", "B"))
+		result.Observe(float64(mult), attribute.String("C", "D"))
 	})
-	require.NoError(t, err)
-
-	counterI, err := meter.AsyncInt64().Counter("int.counterobserver.sum")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		counterI,
-	}, func(ctx context.Context) {
-		counterI.Observe(ctx, int64(2*mult), attribute.String("A", "B"))
-		counterI.Observe(ctx, int64(mult))
+	_ = Must(meter).NewInt64SumObserver("int.sumobserver.sum", func(_ context.Context, result metric.Int64ObserverResult) {
+		result.Observe(int64(2*mult), attribute.String("A", "B"))
+		result.Observe(int64(mult))
 		// last value wins
-		counterI.Observe(ctx, int64(mult), attribute.String("A", "B"))
-		counterI.Observe(ctx, int64(mult))
+		result.Observe(int64(mult), attribute.String("A", "B"))
+		result.Observe(int64(mult))
 	})
-	require.NoError(t, err)
 
-	updowncounterF, err := meter.AsyncFloat64().UpDownCounter("float.updowncounterobserver.sum")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		updowncounterF,
-	}, func(ctx context.Context) {
-		updowncounterF.Observe(ctx, float64(mult), attribute.String("A", "B"))
-		updowncounterF.Observe(ctx, float64(-2*mult), attribute.String("A", "B"))
-		updowncounterF.Observe(ctx, float64(mult), attribute.String("C", "D"))
+	_ = Must(meter).NewFloat64UpDownSumObserver("float.updownsumobserver.sum", func(_ context.Context, result metric.Float64ObserverResult) {
+		result.Observe(float64(mult), attribute.String("A", "B"))
+		result.Observe(float64(-2*mult), attribute.String("A", "B"))
+		result.Observe(float64(mult), attribute.String("C", "D"))
 	})
-	require.NoError(t, err)
-
-	updowncounterI, err := meter.AsyncInt64().UpDownCounter("int.updowncounterobserver.sum")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		updowncounterI,
-	}, func(ctx context.Context) {
-		updowncounterI.Observe(ctx, int64(2*mult), attribute.String("A", "B"))
-		updowncounterI.Observe(ctx, int64(mult))
+	_ = Must(meter).NewInt64UpDownSumObserver("int.updownsumobserver.sum", func(_ context.Context, result metric.Int64ObserverResult) {
+		result.Observe(int64(2*mult), attribute.String("A", "B"))
+		result.Observe(int64(mult))
 		// last value wins
-		updowncounterI.Observe(ctx, int64(mult), attribute.String("A", "B"))
-		updowncounterI.Observe(ctx, int64(-mult))
+		result.Observe(int64(mult), attribute.String("A", "B"))
+		result.Observe(int64(-mult))
 	})
-	require.NoError(t, err)
 
-	unused, err := meter.AsyncInt64().Gauge("empty.gauge.sum")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		unused,
-	}, func(ctx context.Context) {
+	_ = Must(meter).NewInt64ValueObserver("empty.valueobserver.sum", func(_ context.Context, result metric.Int64ObserverResult) {
 	})
-	require.NoError(t, err)
 
 	for mult = 0; mult < 3; mult++ {
-		processor.Reset()
+		processor.accumulations = nil
 
 		collected := sdk.Collect(ctx)
-		require.Equal(t, collected, len(processor.Values()))
+		require.Equal(t, collected, len(processor.accumulations))
 
+		out := processortest.NewOutput(attribute.DefaultEncoder())
+		for _, rec := range processor.accumulations {
+			require.NoError(t, out.AddAccumulation(rec))
+		}
 		mult := float64(mult)
 		require.EqualValues(t, map[string]float64{
-			"float.gauge.lastvalue/A=B/": -mult,
-			"float.gauge.lastvalue/C=D/": -mult,
-			"int.gauge.lastvalue//":      mult,
-			"int.gauge.lastvalue/A=B/":   mult,
+			"float.valueobserver.lastvalue/A=B/R=V": -mult,
+			"float.valueobserver.lastvalue/C=D/R=V": -mult,
+			"int.valueobserver.lastvalue//R=V":      mult,
+			"int.valueobserver.lastvalue/A=B/R=V":   mult,
 
-			"float.counterobserver.sum/A=B/": 3 * mult,
-			"float.counterobserver.sum/C=D/": mult,
-			"int.counterobserver.sum//":      2 * mult,
-			"int.counterobserver.sum/A=B/":   3 * mult,
+			"float.sumobserver.sum/A=B/R=V": 2 * mult,
+			"float.sumobserver.sum/C=D/R=V": mult,
+			"int.sumobserver.sum//R=V":      mult,
+			"int.sumobserver.sum/A=B/R=V":   mult,
 
-			"float.updowncounterobserver.sum/A=B/": -mult,
-			"float.updowncounterobserver.sum/C=D/": mult,
-			"int.updowncounterobserver.sum//":      0,
-			"int.updowncounterobserver.sum/A=B/":   3 * mult,
-		}, processor.Values())
+			"float.updownsumobserver.sum/A=B/R=V": -2 * mult,
+			"float.updownsumobserver.sum/C=D/R=V": mult,
+			"int.updownsumobserver.sum//R=V":      -mult,
+			"int.updownsumobserver.sum/A=B/R=V":   mult,
+		}, out.Map())
 	}
 }
 
-func TestCounterObserverInputRange(t *testing.T) {
+func TestSumObserverInputRange(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
 	// TODO: these tests are testing for negative values, not for _descending values_. Fix.
-	counterF, _ := meter.AsyncFloat64().Counter("float.counterobserver.sum")
-	err := meter.RegisterCallback([]instrument.Asynchronous{
-		counterF,
-	}, func(ctx context.Context) {
-		counterF.Observe(ctx, -2, attribute.String("A", "B"))
+	_ = Must(meter).NewFloat64SumObserver("float.sumobserver.sum", func(_ context.Context, result metric.Float64ObserverResult) {
+		result.Observe(-2, attribute.String("A", "B"))
 		require.Equal(t, aggregation.ErrNegativeInput, testHandler.Flush())
-		counterF.Observe(ctx, -1, attribute.String("C", "D"))
+		result.Observe(-1, attribute.String("C", "D"))
 		require.Equal(t, aggregation.ErrNegativeInput, testHandler.Flush())
 	})
-	require.NoError(t, err)
-	counterI, _ := meter.AsyncInt64().Counter("int.counterobserver.sum")
-	err = meter.RegisterCallback([]instrument.Asynchronous{
-		counterI,
-	}, func(ctx context.Context) {
-		counterI.Observe(ctx, -1, attribute.String("A", "B"))
+	_ = Must(meter).NewInt64SumObserver("int.sumobserver.sum", func(_ context.Context, result metric.Int64ObserverResult) {
+		result.Observe(-1, attribute.String("A", "B"))
 		require.Equal(t, aggregation.ErrNegativeInput, testHandler.Flush())
-		counterI.Observe(ctx, -1)
+		result.Observe(-1)
 		require.Equal(t, aggregation.ErrNegativeInput, testHandler.Flush())
 	})
-	require.NoError(t, err)
 
 	collected := sdk.Collect(ctx)
 
 	require.Equal(t, 0, collected)
-	require.EqualValues(t, map[string]float64{}, processor.Values())
+	require.Equal(t, 0, len(processor.accumulations))
 
 	// check that the error condition was reset
 	require.NoError(t, testHandler.Flush())
@@ -425,148 +400,191 @@ func TestCounterObserverInputRange(t *testing.T) {
 
 func TestObserverBatch(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	floatGaugeObs, _ := meter.AsyncFloat64().Gauge("float.gauge.lastvalue")
-	intGaugeObs, _ := meter.AsyncInt64().Gauge("int.gauge.lastvalue")
-	floatCounterObs, _ := meter.AsyncFloat64().Counter("float.counterobserver.sum")
-	intCounterObs, _ := meter.AsyncInt64().Counter("int.counterobserver.sum")
-	floatUpDownCounterObs, _ := meter.AsyncFloat64().UpDownCounter("float.updowncounterobserver.sum")
-	intUpDownCounterObs, _ := meter.AsyncInt64().UpDownCounter("int.updowncounterobserver.sum")
+	var floatValueObs metric.Float64ValueObserver
+	var intValueObs metric.Int64ValueObserver
+	var floatSumObs metric.Float64SumObserver
+	var intSumObs metric.Int64SumObserver
+	var floatUpDownSumObs metric.Float64UpDownSumObserver
+	var intUpDownSumObs metric.Int64UpDownSumObserver
 
-	err := meter.RegisterCallback([]instrument.Asynchronous{
-		floatGaugeObs,
-		intGaugeObs,
-		floatCounterObs,
-		intCounterObs,
-		floatUpDownCounterObs,
-		intUpDownCounterObs,
-	}, func(ctx context.Context) {
-		ab := attribute.String("A", "B")
-		floatGaugeObs.Observe(ctx, 1, ab)
-		floatGaugeObs.Observe(ctx, -1, ab)
-		intGaugeObs.Observe(ctx, -1, ab)
-		intGaugeObs.Observe(ctx, 1, ab)
-		floatCounterObs.Observe(ctx, 1000, ab)
-		intCounterObs.Observe(ctx, 100, ab)
-		floatUpDownCounterObs.Observe(ctx, -1000, ab)
-		intUpDownCounterObs.Observe(ctx, -100, ab)
-
-		cd := attribute.String("C", "D")
-		floatGaugeObs.Observe(ctx, -1, cd)
-		floatCounterObs.Observe(ctx, -1, cd)
-		floatUpDownCounterObs.Observe(ctx, -1, cd)
-
-		intGaugeObs.Observe(ctx, 1)
-		intGaugeObs.Observe(ctx, 1)
-		intCounterObs.Observe(ctx, 10)
-		floatCounterObs.Observe(ctx, 1.1)
-		intUpDownCounterObs.Observe(ctx, 10)
-	})
-	require.NoError(t, err)
+	var batch = Must(meter).NewBatchObserver(
+		func(_ context.Context, result metric.BatchObserverResult) {
+			result.Observe(
+				[]attribute.KeyValue{
+					attribute.String("A", "B"),
+				},
+				floatValueObs.Observation(1),
+				floatValueObs.Observation(-1),
+				intValueObs.Observation(-1),
+				intValueObs.Observation(1),
+				floatSumObs.Observation(1000),
+				intSumObs.Observation(100),
+				floatUpDownSumObs.Observation(-1000),
+				intUpDownSumObs.Observation(-100),
+			)
+			result.Observe(
+				[]attribute.KeyValue{
+					attribute.String("C", "D"),
+				},
+				floatValueObs.Observation(-1),
+				floatSumObs.Observation(-1),
+				floatUpDownSumObs.Observation(-1),
+			)
+			result.Observe(
+				nil,
+				intValueObs.Observation(1),
+				intValueObs.Observation(1),
+				intSumObs.Observation(10),
+				floatSumObs.Observation(1.1),
+				intUpDownSumObs.Observation(10),
+			)
+		})
+	floatValueObs = batch.NewFloat64ValueObserver("float.valueobserver.lastvalue")
+	intValueObs = batch.NewInt64ValueObserver("int.valueobserver.lastvalue")
+	floatSumObs = batch.NewFloat64SumObserver("float.sumobserver.sum")
+	intSumObs = batch.NewInt64SumObserver("int.sumobserver.sum")
+	floatUpDownSumObs = batch.NewFloat64UpDownSumObserver("float.updownsumobserver.sum")
+	intUpDownSumObs = batch.NewInt64UpDownSumObserver("int.updownsumobserver.sum")
 
 	collected := sdk.Collect(ctx)
 
-	require.Equal(t, collected, len(processor.Values()))
+	require.Equal(t, collected, len(processor.accumulations))
 
+	out := processortest.NewOutput(attribute.DefaultEncoder())
+	for _, rec := range processor.accumulations {
+		require.NoError(t, out.AddAccumulation(rec))
+	}
 	require.EqualValues(t, map[string]float64{
-		"float.counterobserver.sum//":    1.1,
-		"float.counterobserver.sum/A=B/": 1000,
-		"int.counterobserver.sum//":      10,
-		"int.counterobserver.sum/A=B/":   100,
+		"float.sumobserver.sum//R=V":    1.1,
+		"float.sumobserver.sum/A=B/R=V": 1000,
+		"int.sumobserver.sum//R=V":      10,
+		"int.sumobserver.sum/A=B/R=V":   100,
 
-		"int.updowncounterobserver.sum/A=B/":   -100,
-		"float.updowncounterobserver.sum/A=B/": -1000,
-		"int.updowncounterobserver.sum//":      10,
-		"float.updowncounterobserver.sum/C=D/": -1,
+		"int.updownsumobserver.sum/A=B/R=V":   -100,
+		"float.updownsumobserver.sum/A=B/R=V": -1000,
+		"int.updownsumobserver.sum//R=V":      10,
+		"float.updownsumobserver.sum/C=D/R=V": -1,
 
-		"float.gauge.lastvalue/A=B/": -1,
-		"float.gauge.lastvalue/C=D/": -1,
-		"int.gauge.lastvalue//":      1,
-		"int.gauge.lastvalue/A=B/":   1,
-	}, processor.Values())
+		"float.valueobserver.lastvalue/A=B/R=V": -1,
+		"float.valueobserver.lastvalue/C=D/R=V": -1,
+		"int.valueobserver.lastvalue//R=V":      1,
+		"int.valueobserver.lastvalue/A=B/R=V":   1,
+	}, out.Map())
 }
 
-// TestRecordPersistence ensures that a direct-called instrument that is
-// repeatedly used each interval results in a persistent record, so that its
-// encoded attribute will be cached across collection intervals.
+func TestRecordBatch(t *testing.T) {
+	ctx := context.Background()
+	meter, sdk, processor := newSDK(t)
+
+	counter1 := Must(meter).NewInt64Counter("int64.sum")
+	counter2 := Must(meter).NewFloat64Counter("float64.sum")
+	valuerecorder1 := Must(meter).NewInt64ValueRecorder("int64.exact")
+	valuerecorder2 := Must(meter).NewFloat64ValueRecorder("float64.exact")
+
+	sdk.RecordBatch(
+		ctx,
+		[]attribute.KeyValue{
+			attribute.String("A", "B"),
+			attribute.String("C", "D"),
+		},
+		counter1.Measurement(1),
+		counter2.Measurement(2),
+		valuerecorder1.Measurement(3),
+		valuerecorder2.Measurement(4),
+	)
+
+	sdk.Collect(ctx)
+
+	out := processortest.NewOutput(attribute.DefaultEncoder())
+	for _, rec := range processor.accumulations {
+		require.NoError(t, out.AddAccumulation(rec))
+	}
+	require.EqualValues(t, map[string]float64{
+		"int64.sum/A=B,C=D/R=V":     1,
+		"float64.sum/A=B,C=D/R=V":   2,
+		"int64.exact/A=B,C=D/R=V":   3,
+		"float64.exact/A=B,C=D/R=V": 4,
+	}, out.Map())
+}
+
+// TestRecordPersistence ensures that a direct-called instrument that
+// is repeatedly used each interval results in a persistent record, so
+// that its encoded labels will be cached across collection intervals.
 func TestRecordPersistence(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, selector, _ := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	c, err := meter.SyncFloat64().Counter("name.sum")
-	require.NoError(t, err)
-
+	c := Must(meter).NewFloat64Counter("name.sum")
+	b := c.Bind(attribute.String("bound", "true"))
 	uk := attribute.String("bound", "false")
 
 	for i := 0; i < 100; i++ {
 		c.Add(ctx, 1, uk)
+		b.Add(ctx, 1)
 		sdk.Collect(ctx)
 	}
 
-	require.Equal(t, 2, selector.newAggCount)
+	require.Equal(t, 4, processor.newAggCount)
 }
 
 func TestIncorrectInstruments(t *testing.T) {
 	// The Batch observe/record APIs are susceptible to
 	// uninitialized instruments.
-	var observer asyncint64.Gauge
+	var counter metric.Int64Counter
+	var observer metric.Int64ValueObserver
 
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, _ := newSDK(t)
 
 	// Now try with uninitialized instruments.
-	err := meter.RegisterCallback([]instrument.Asynchronous{
-		observer,
-	}, func(ctx context.Context) {
-		observer.Observe(ctx, 1)
+	meter.RecordBatch(ctx, nil, counter.Measurement(1))
+	meter.NewBatchObserver(func(_ context.Context, result metric.BatchObserverResult) {
+		result.Observe(nil, observer.Observation(1))
 	})
-	require.ErrorIs(t, err, metricsdk.ErrBadInstrument)
 
 	collected := sdk.Collect(ctx)
-	err = testHandler.Flush()
-	require.NoError(t, err)
+	require.Equal(t, metricsdk.ErrUninitializedInstrument, testHandler.Flush())
 	require.Equal(t, 0, collected)
 
 	// Now try with instruments from another SDK.
-	noopMeter := metric.NewNoopMeter()
-	observer, _ = noopMeter.AsyncInt64().Gauge("observer")
+	var noopMeter metric.Meter
+	counter = metric.Must(noopMeter).NewInt64Counter("name.sum")
+	observer = metric.Must(noopMeter).NewBatchObserver(
+		func(context.Context, metric.BatchObserverResult) {},
+	).NewInt64ValueObserver("observer")
 
-	err = meter.RegisterCallback(
-		[]instrument.Asynchronous{observer},
-		func(ctx context.Context) {
-			observer.Observe(ctx, 1)
-		},
-	)
-	require.ErrorIs(t, err, metricsdk.ErrBadInstrument)
+	meter.RecordBatch(ctx, nil, counter.Measurement(1))
+	meter.NewBatchObserver(func(_ context.Context, result metric.BatchObserverResult) {
+		result.Observe(nil, observer.Observation(1))
+	})
 
 	collected = sdk.Collect(ctx)
 	require.Equal(t, 0, collected)
-	require.EqualValues(t, map[string]float64{}, processor.Values())
-
-	err = testHandler.Flush()
-	require.NoError(t, err)
+	require.Equal(t, metricsdk.ErrUninitializedInstrument, testHandler.Flush())
 }
 
 func TestSyncInAsync(t *testing.T) {
 	ctx := context.Background()
-	meter, sdk, _, processor := newSDK(t)
+	meter, sdk, processor := newSDK(t)
 
-	counter, _ := meter.SyncFloat64().Counter("counter.sum")
-	gauge, _ := meter.AsyncInt64().Gauge("observer.lastvalue")
-
-	err := meter.RegisterCallback([]instrument.Asynchronous{
-		gauge,
-	}, func(ctx context.Context) {
-		gauge.Observe(ctx, 10)
-		counter.Add(ctx, 100)
-	})
-	require.NoError(t, err)
+	counter := Must(meter).NewFloat64Counter("counter.sum")
+	_ = Must(meter).NewInt64ValueObserver("observer.lastvalue",
+		func(ctx context.Context, result metric.Int64ObserverResult) {
+			result.Observe(10)
+			counter.Add(ctx, 100)
+		},
+	)
 
 	sdk.Collect(ctx)
 
+	out := processortest.NewOutput(attribute.DefaultEncoder())
+	for _, rec := range processor.accumulations {
+		require.NoError(t, out.AddAccumulation(rec))
+	}
 	require.EqualValues(t, map[string]float64{
-		"counter.sum//":        100,
-		"observer.lastvalue//": 10,
-	}, processor.Values())
+		"counter.sum//R=V":        100,
+		"observer.lastvalue//R=V": 10,
+	}, out.Map())
 }

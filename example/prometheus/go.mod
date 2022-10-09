@@ -1,38 +1,52 @@
 module go.opentelemetry.io/otel/example/prometheus
 
-go 1.17
+go 1.14
 
 replace (
 	go.opentelemetry.io/otel => ../..
-	go.opentelemetry.io/otel/exporters/prometheus => ../../exporters/prometheus
+	go.opentelemetry.io/otel/exporters/metric/prometheus => ../../exporters/metric/prometheus
 	go.opentelemetry.io/otel/sdk => ../../sdk
 )
 
 require (
-	go.opentelemetry.io/otel v1.10.0
-	go.opentelemetry.io/otel/exporters/prometheus v0.31.0
-	go.opentelemetry.io/otel/metric v0.31.0
-	go.opentelemetry.io/otel/sdk/metric v0.31.0
+	go.opentelemetry.io/otel v0.20.0
+	go.opentelemetry.io/otel/exporters/metric/prometheus v0.20.0
+	go.opentelemetry.io/otel/metric v0.20.0
 )
 
-require (
-	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.1.2 // indirect
-	github.com/go-logr/logr v1.2.3 // indirect
-	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
-	github.com/prometheus/client_golang v1.12.2 // indirect
-	github.com/prometheus/client_model v0.2.0 // indirect
-	github.com/prometheus/common v0.32.1 // indirect
-	github.com/prometheus/procfs v0.7.3 // indirect
-	go.opentelemetry.io/otel/sdk v1.10.0 // indirect
-	go.opentelemetry.io/otel/trace v1.10.0 // indirect
-	golang.org/x/sys v0.0.0-20220114195835-da31bd327af9 // indirect
-	google.golang.org/protobuf v1.26.0 // indirect
-)
+replace go.opentelemetry.io/otel/bridge/opencensus => ../../bridge/opencensus
+
+replace go.opentelemetry.io/otel/bridge/opentracing => ../../bridge/opentracing
+
+replace go.opentelemetry.io/otel/example/jaeger => ../jaeger
+
+replace go.opentelemetry.io/otel/example/namedtracer => ../namedtracer
+
+replace go.opentelemetry.io/otel/example/opencensus => ../opencensus
+
+replace go.opentelemetry.io/otel/example/otel-collector => ../otel-collector
+
+replace go.opentelemetry.io/otel/example/prom-collector => ../prom-collector
+
+replace go.opentelemetry.io/otel/example/prometheus => ./
+
+replace go.opentelemetry.io/otel/example/zipkin => ../zipkin
+
+replace go.opentelemetry.io/otel/exporters/otlp => ../../exporters/otlp
+
+replace go.opentelemetry.io/otel/exporters/stdout => ../../exporters/stdout
+
+replace go.opentelemetry.io/otel/exporters/trace/jaeger => ../../exporters/trace/jaeger
+
+replace go.opentelemetry.io/otel/exporters/trace/zipkin => ../../exporters/trace/zipkin
+
+replace go.opentelemetry.io/otel/internal/tools => ../../internal/tools
 
 replace go.opentelemetry.io/otel/metric => ../../metric
+
+replace go.opentelemetry.io/otel/oteltest => ../../oteltest
+
+replace go.opentelemetry.io/otel/sdk/export/metric => ../../sdk/export/metric
 
 replace go.opentelemetry.io/otel/sdk/metric => ../../sdk/metric
 

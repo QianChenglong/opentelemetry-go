@@ -159,8 +159,8 @@ func TestUniqueness(t *testing.T) {
 	for _, tc := range cases {
 		cpy := make([]attribute.KeyValue, len(tc.kvs))
 		copy(cpy, tc.kvs)
-		distinct, uniq := attribute.NewSetWithFiltered(cpy, func(attr attribute.KeyValue) bool {
-			return tc.keyRe.MatchString(string(attr.Key))
+		distinct, uniq := attribute.NewSetWithFiltered(cpy, func(label attribute.KeyValue) bool {
+			return tc.keyRe.MatchString(string(label.Key))
 		})
 
 		full := attribute.NewSet(uniq...)
@@ -185,6 +185,6 @@ func TestLookup(t *testing.T) {
 	require.True(t, has)
 	require.Equal(t, int64(1), value.AsInt64())
 
-	_, has = set.Value("D")
+	value, has = set.Value("D")
 	require.False(t, has)
 }

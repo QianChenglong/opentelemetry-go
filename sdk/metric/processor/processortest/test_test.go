@@ -21,35 +21,32 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric/instrument"
-	"go.opentelemetry.io/otel/sdk/instrumentation"
+	"go.opentelemetry.io/otel/metric"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/processor/processortest"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
+	processorTest "go.opentelemetry.io/otel/sdk/metric/processor/processortest"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-func generateTestData(t *testing.T, proc export.Processor) {
+func generateTestData(proc export.Processor) {
 	ctx := context.Background()
-	accum := metricsdk.NewAccumulator(proc)
-	meter := sdkapi.WrapMeterImpl(accum)
+	accum := metricsdk.NewAccumulator(
+		proc,
+		resource.NewWithAttributes(attribute.String("R", "V")),
+	)
+	meter := metric.WrapMeterImpl(accum, "testing")
 
-	counter, err := meter.SyncFloat64().Counter("counter.sum")
-	require.NoError(t, err)
+	counter := metric.Must(meter).NewFloat64Counter("counter.sum")
+
+	_ = metric.Must(meter).NewInt64SumObserver("observer.sum",
+		func(_ context.Context, result metric.Int64ObserverResult) {
+			result.Observe(10, attribute.String("K1", "V1"))
+			result.Observe(11, attribute.String("K1", "V2"))
+		},
+	)
 
 	counter.Add(ctx, 100, attribute.String("K1", "V1"))
 	counter.Add(ctx, 101, attribute.String("K1", "V2"))
-
-	counterObserver, err := meter.AsyncInt64().Counter("observer.sum")
-	require.NoError(t, err)
-
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		counterObserver.Observe(ctx, 10, attribute.String("K1", "V1"))
-		counterObserver.Observe(ctx, 11, attribute.String("K1", "V2"))
-	})
-	require.NoError(t, err)
 
 	accum.Collect(ctx)
 }
@@ -57,15 +54,14 @@ func generateTestData(t *testing.T, proc export.Processor) {
 func TestProcessorTesting(t *testing.T) {
 	// Test the Processor test helper using a real Accumulator to
 	// generate Accumulations.
-	checkpointer := processortest.NewCheckpointer(
-		processortest.NewProcessor(
-			processortest.AggregatorSelector(),
-			attribute.DefaultEncoder(),
-		),
+	testProc := processorTest.NewProcessor(
+		processorTest.AggregatorSelector(),
+		attribute.DefaultEncoder(),
 	)
-	generateTestData(t, checkpointer)
+	checkpointer := processorTest.Checkpointer(testProc)
 
-	res := resource.NewSchemaless(attribute.String("R", "V"))
+	generateTestData(checkpointer)
+
 	expect := map[string]float64{
 		"counter.sum/K1=V1/R=V":  100,
 		"counter.sum/K1=V2/R=V":  101,
@@ -73,18 +69,16 @@ func TestProcessorTesting(t *testing.T) {
 		"observer.sum/K1=V2/R=V": 11,
 	}
 
+	// Validate the processor's checkpoint directly.
+	require.EqualValues(t, expect, testProc.Values())
+
 	// Export the data and validate it again.
-	exporter := processortest.New(
-		aggregation.StatelessTemporalitySelector(),
+	exporter := processorTest.NewExporter(
+		export.StatelessExportKindSelector(),
 		attribute.DefaultEncoder(),
 	)
 
-	err := exporter.Export(context.Background(), res, processortest.OneInstrumentationLibraryReader(
-		instrumentation.Library{
-			Name: "test",
-		},
-		checkpointer.Reader(),
-	))
+	err := exporter.Export(context.Background(), checkpointer.CheckpointSet())
 	require.NoError(t, err)
 	require.EqualValues(t, expect, exporter.Values())
 }

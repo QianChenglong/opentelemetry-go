@@ -1,22 +1,18 @@
-# OpenTelemetry Exporters
+# Exporters
 
-Once the OpenTelemetry SDK has created and processed telemetry, it needs to be exported.
-This package contains exporters for this purpose.
+Included in this directory are exporters that export both metric and trace telemetry.
 
-## Exporter Packages
+- [stdout](./stdout): Writes telemetry to a specified local output as structured JSON.
+- [otlp](./otlp): Sends telemetry to an OpenTelemetry collector as OTLP.
 
-The following exporter packages are provided with the following OpenTelemetry signal support.
+Additionally, there are [metric](./metric) and [trace](./trace) only exporters.
 
-| Exporter Package                                                                | Metrics | Traces |
-| :-----------------------------------------------------------------------------: | :-----: | :----: |
-| [go.opentelemetry.io/otel/exporters/jaeger](./jaeger)                           |         | ✓      |
-| [go.opentelemetry.io/otel/exporters/otlp/otlpmetric](./otlp/otlpmetric)         | ✓       |        |
-| [go.opentelemetry.io/otel/exporters/otlp/otlptrace](./otlp/otlptrace)           |         | ✓      |
-| [go.opentelemetry.io/otel/exporters/prometheus](./prometheus)                   | ✓       |        |
-| [go.opentelemetry.io/otel/exporters/stdout/stdoutmetric](./stdout/stdoutmetric) | ✓       |        |
-| [go.opentelemetry.io/otel/exporters/stdout/stdouttrace](./stdout/stdouttrace)   |         | ✓      |
-| [go.opentelemetry.io/otel/exporters/zipkin](./zipkin)                           |         | ✓      |
+## Metric Telemetry Only
 
-See the [OpenTelemetry registry] for 3rd-part exporters compatible with this project.
+- [prometheus](./metric/prometheus): Exposes metric telemetry as Prometheus metrics.
+- [test](./metric/test): A development tool when testing the telemetry pipeline.
 
-[OpenTelemetry registry]: https://opentelemetry.io/registry/?language=go&component=exporter
+## Trace Telemetry Only
+
+- [jaeger](./trace/jaeger): Sends properly transformed trace telemetry to a Jaeger endpoint.
+- [zipkin](./trace/zipkin): Sends properly transformed trace telemetry to a Zipkin endpoint.

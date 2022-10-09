@@ -16,12 +16,12 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
-	"go.opencensus.io/metric"
 	"go.opencensus.io/metric/metricdata"
+
+	"go.opencensus.io/metric"
 	"go.opencensus.io/metric/metricexport"
 	"go.opencensus.io/metric/metricproducer"
 	"go.opencensus.io/stats"
@@ -31,16 +31,15 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/bridge/opencensus"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/sdk/metric/export"
+	"go.opentelemetry.io/otel/exporters/stdout"
+	otmetricexport "go.opentelemetry.io/otel/sdk/export/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 var (
 	// instrumenttype differentiates between our gauge and view metrics.
 	keyType = tag.MustNewKey("instrumenttype")
-	// Counts the number of lines read in from standard input.
+	// Counts the number of lines read in from standard input
 	countMeasure = stats.Int64("test_count", "A count of something", stats.UnitDimensionless)
 	countView    = &view.View{
 		Name:        "test_count",
@@ -52,19 +51,13 @@ var (
 )
 
 func main() {
-	log.Println("Using OpenTelemetry stdout exporters.")
-	traceExporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	log.Println("Using OpenTelemetry stdout exporter.")
+	otExporter, err := stdout.NewExporter(stdout.WithPrettyPrint())
 	if err != nil {
-		log.Fatal(fmt.Errorf("error creating trace exporter: %w", err))
-	}
-	metricsExporter, err := stdoutmetric.New(stdoutmetric.WithPrettyPrint())
-	if err != nil {
-		log.Fatal(fmt.Errorf("error creating metric exporter: %w", err))
-	}
-	tracing(traceExporter)
-	if err := monitoring(metricsExporter); err != nil {
 		log.Fatal(err)
 	}
+	tracing(otExporter)
+	monitoring(otExporter)
 }
 
 // tracing demonstrates overriding the OpenCensus DefaultTracer to send spans
@@ -75,45 +68,41 @@ func tracing(otExporter sdktrace.SpanExporter) {
 	log.Println("Configuring OpenCensus.  Not Registering any OpenCensus exporters.")
 	octrace.ApplyConfig(octrace.Config{DefaultSampler: octrace.AlwaysSample()})
 
-	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(otExporter))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(otExporter))
 	otel.SetTracerProvider(tp)
 
 	log.Println("Installing the OpenCensus bridge to make OpenCensus libraries write spans using OpenTelemetry.")
 	tracer := tp.Tracer("simple")
 	octrace.DefaultTracer = opencensus.NewTracer(tracer)
-	tp.ForceFlush(ctx)
 
-	log.Println("Creating OpenCensus span, which should be printed out using the OpenTelemetry stdouttrace exporter.\n-- It should have no parent, since it is the first span.")
+	log.Println("Creating OpenCensus span, which should be printed out using the OpenTelemetry stdout exporter.\n-- It should have no parent, since it is the first span.")
 	ctx, outerOCSpan := octrace.StartSpan(ctx, "OpenCensusOuterSpan")
 	outerOCSpan.End()
-	tp.ForceFlush(ctx)
 
 	log.Println("Creating OpenTelemetry span\n-- It should have the OpenCensus span as a parent, since the OpenCensus span was written with using OpenTelemetry APIs.")
 	ctx, otspan := tracer.Start(ctx, "OpenTelemetrySpan")
 	otspan.End()
-	tp.ForceFlush(ctx)
 
-	log.Println("Creating OpenCensus span, which should be printed out using the OpenTelemetry stdouttrace exporter.\n-- It should have the OpenTelemetry span as a parent, since it was written using OpenTelemetry APIs")
+	log.Println("Creating OpenCensus span, which should be printed out using the OpenTelemetry stdout exporter.\n-- It should have the OpenTelemetry span as a parent, since it was written using OpenTelemetry APIs")
 	_, innerOCSpan := octrace.StartSpan(ctx, "OpenCensusInnerSpan")
 	innerOCSpan.End()
-	tp.ForceFlush(ctx)
 }
 
 // monitoring demonstrates creating an IntervalReader using the OpenTelemetry
 // exporter to send metrics to the exporter by using either an OpenCensus
 // registry or an OpenCensus view.
-func monitoring(otExporter export.Exporter) error {
-	log.Println("Using the OpenTelemetry stdoutmetric exporter to export OpenCensus metrics.  This allows routing telemetry from both OpenTelemetry and OpenCensus to a single exporter.")
+func monitoring(otExporter otmetricexport.Exporter) {
+	log.Println("Using the OpenTelemetry stdout exporter to export OpenCensus metrics.  This allows routing telemetry from both OpenTelemetry and OpenCensus to a single exporter.")
 	ocExporter := opencensus.NewMetricExporter(otExporter)
 	intervalReader, err := metricexport.NewIntervalReader(&metricexport.Reader{}, ocExporter)
 	if err != nil {
-		return fmt.Errorf("failed to create interval reader: %w", err)
+		log.Fatalf("Failed to create interval reader: %v\n", err)
 	}
 	intervalReader.ReportingInterval = 10 * time.Second
-	log.Println("Emitting metrics using OpenCensus APIs.  These should be printed out using the OpenTelemetry stdoutmetric exporter.")
+	log.Println("Emitting metrics using OpenCensus APIs.  These should be printed out using the OpenTelemetry stdout exporter.")
 	err = intervalReader.Start()
 	if err != nil {
-		return fmt.Errorf("failed to start interval reader: %w", err)
+		log.Fatalf("Failed to start interval reader: %v\n", err)
 	}
 	defer intervalReader.Stop()
 
@@ -128,20 +117,20 @@ func monitoring(otExporter export.Exporter) error {
 		}),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to add gauge: %w", err)
+		log.Fatalf("Failed to add gauge: %v\n", err)
 	}
 	entry, err := gauge.GetEntry()
 	if err != nil {
-		return fmt.Errorf("failed to get gauge entry: %w", err)
+		log.Fatalf("Failed to get gauge entry: %v\n", err)
 	}
 
 	log.Println("Registering a cumulative metric using an OpenCensus view.")
 	if err := view.Register(countView); err != nil {
-		return fmt.Errorf("failed to register views: %w", err)
+		log.Fatalf("Failed to register views: %v", err)
 	}
 	ctx, err := tag.New(context.Background(), tag.Insert(keyType, "view"))
 	if err != nil {
-		return fmt.Errorf("failed to set tag: %w", err)
+		log.Fatalf("Failed to set tag: %v\n", err)
 	}
 	for i := int64(1); true; i++ {
 		// update stats for our gauge
@@ -150,5 +139,4 @@ func monitoring(otExporter export.Exporter) error {
 		stats.Record(ctx, countMeasure.M(1))
 		time.Sleep(time.Second)
 	}
-	return nil
 }

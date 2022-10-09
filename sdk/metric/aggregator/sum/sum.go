@@ -17,10 +17,11 @@ package sum // import "go.opentelemetry.io/otel/sdk/metric/aggregator/sum"
 import (
 	"context"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/number"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 )
 
 // Aggregator aggregates counter events.
@@ -30,7 +31,8 @@ type Aggregator struct {
 	value number.Number
 }
 
-var _ aggregator.Aggregator = &Aggregator{}
+var _ export.Aggregator = &Aggregator{}
+var _ export.Subtractor = &Aggregator{}
 var _ aggregation.Sum = &Aggregator{}
 
 // New returns a new counter aggregator implemented by atomic
@@ -58,7 +60,7 @@ func (c *Aggregator) Sum() (number.Number, error) {
 
 // SynchronizedMove atomically saves the current value into oa and resets the
 // current sum to zero.
-func (c *Aggregator) SynchronizedMove(oa aggregator.Aggregator, _ *sdkapi.Descriptor) error {
+func (c *Aggregator) SynchronizedMove(oa export.Aggregator, _ *metric.Descriptor) error {
 	if oa == nil {
 		c.value.SetRawAtomic(0)
 		return nil
@@ -72,17 +74,33 @@ func (c *Aggregator) SynchronizedMove(oa aggregator.Aggregator, _ *sdkapi.Descri
 }
 
 // Update atomically adds to the current value.
-func (c *Aggregator) Update(_ context.Context, num number.Number, desc *sdkapi.Descriptor) error {
+func (c *Aggregator) Update(_ context.Context, num number.Number, desc *metric.Descriptor) error {
 	c.value.AddNumberAtomic(desc.NumberKind(), num)
 	return nil
 }
 
 // Merge combines two counters by adding their sums.
-func (c *Aggregator) Merge(oa aggregator.Aggregator, desc *sdkapi.Descriptor) error {
+func (c *Aggregator) Merge(oa export.Aggregator, desc *metric.Descriptor) error {
 	o, _ := oa.(*Aggregator)
 	if o == nil {
 		return aggregator.NewInconsistentAggregatorError(c, oa)
 	}
 	c.value.AddNumber(desc.NumberKind(), o.value)
+	return nil
+}
+
+func (c *Aggregator) Subtract(opAgg, resAgg export.Aggregator, descriptor *metric.Descriptor) error {
+	op, _ := opAgg.(*Aggregator)
+	if op == nil {
+		return aggregator.NewInconsistentAggregatorError(c, opAgg)
+	}
+
+	res, _ := resAgg.(*Aggregator)
+	if res == nil {
+		return aggregator.NewInconsistentAggregatorError(c, resAgg)
+	}
+
+	res.value = c.value
+	res.value.AddNumber(descriptor.NumberKind(), number.NewNumberSignChange(descriptor.NumberKind(), op.value))
 	return nil
 }

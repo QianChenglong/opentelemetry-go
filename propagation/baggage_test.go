@@ -21,108 +21,65 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/assert"
 
-	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/internal/baggage"
 	"go.opentelemetry.io/otel/propagation"
 )
-
-type property struct {
-	Key, Value string
-}
-
-type member struct {
-	Key, Value string
-
-	Properties []property
-}
-
-func (m member) Member(t *testing.T) baggage.Member {
-	props := make([]baggage.Property, 0, len(m.Properties))
-	for _, p := range m.Properties {
-		p, err := baggage.NewKeyValueProperty(p.Key, p.Value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		props = append(props, p)
-	}
-
-	bMember, err := baggage.NewMember(m.Key, m.Value, props...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bMember
-}
-
-type members []member
-
-func (m members) Baggage(t *testing.T) baggage.Baggage {
-	bMembers := make([]baggage.Member, 0, len(m))
-	for _, mem := range m {
-		bMembers = append(bMembers, mem.Member(t))
-	}
-	bag, err := baggage.New(bMembers...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bag
-}
 
 func TestExtractValidBaggageFromHTTPReq(t *testing.T) {
 	prop := propagation.TextMapPropagator(propagation.Baggage{})
 	tests := []struct {
-		name   string
-		header string
-		want   members
+		name    string
+		header  string
+		wantKVs []attribute.KeyValue
 	}{
 		{
 			name:   "valid w3cHeader",
 			header: "key1=val1,key2=val2",
-			want: members{
-				{Key: "key1", Value: "val1"},
-				{Key: "key2", Value: "val2"},
+			wantKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2"),
 			},
 		},
 		{
 			name:   "valid w3cHeader with spaces",
 			header: "key1 =   val1,  key2 =val2   ",
-			want: members{
-				{Key: "key1", Value: "val1"},
-				{Key: "key2", Value: "val2"},
+			wantKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2"),
 			},
 		},
 		{
 			name:   "valid w3cHeader with properties",
 			header: "key1=val1,key2=val2;prop=1",
-			want: members{
-				{Key: "key1", Value: "val1"},
-				{
-					Key:   "key2",
-					Value: "val2",
-					Properties: []property{
-						{Key: "prop", Value: "1"},
-					},
-				},
+			wantKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2;prop=1"),
+			},
+		},
+		{
+			name:   "valid header with url-escaped comma",
+			header: "key1=val1,key2=val2%2Cval3",
+			wantKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2,val3"),
 			},
 		},
 		{
 			name:   "valid header with an invalid header",
 			header: "key1=val1,key2=val2,a,val3",
-			want:   members{},
+			wantKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2"),
+			},
 		},
 		{
 			name:   "valid header with no value",
 			header: "key1=,key2=val2",
-			want: members{
-				{Key: "key1", Value: ""},
-				{Key: "key2", Value: "val2"},
-			},
-		},
-		{
-			name:   "valid header with url encoded string",
-			header: "key1=val%252",
-			want: members{
-				{Key: "key1", Value: "val%2"},
+			wantKVs: []attribute.KeyValue{
+				attribute.String("key1", ""),
+				attribute.String("key2", "val2"),
 			},
 		},
 	}
@@ -134,8 +91,27 @@ func TestExtractValidBaggageFromHTTPReq(t *testing.T) {
 
 			ctx := context.Background()
 			ctx = prop.Extract(ctx, propagation.HeaderCarrier(req.Header))
-			expected := tt.want.Baggage(t)
-			assert.Equal(t, expected, baggage.FromContext(ctx))
+			gotBaggage := baggage.MapFromContext(ctx)
+			wantBaggage := baggage.NewMap(baggage.MapUpdate{MultiKV: tt.wantKVs})
+			if gotBaggage.Len() != wantBaggage.Len() {
+				t.Errorf(
+					"Got and Want Baggage are not the same size %d != %d",
+					gotBaggage.Len(),
+					wantBaggage.Len(),
+				)
+			}
+			totalDiff := ""
+			wantBaggage.Foreach(func(keyValue attribute.KeyValue) bool {
+				val, _ := gotBaggage.Value(keyValue.Key)
+				diff := cmp.Diff(keyValue, attribute.KeyValue{Key: keyValue.Key, Value: val}, cmp.AllowUnexported(attribute.Value{}))
+				if diff != "" {
+					totalDiff += diff + "\n"
+				}
+				return true
+			})
+			if totalDiff != "" {
+				t.Errorf("Extract Tracecontext: %s: -got +want %s", tt.name, totalDiff)
+			}
 		})
 	}
 }
@@ -145,7 +121,7 @@ func TestExtractInvalidDistributedContextFromHTTPReq(t *testing.T) {
 	tests := []struct {
 		name   string
 		header string
-		has    members
+		hasKVs []attribute.KeyValue
 	}{
 		{
 			name:   "no key values",
@@ -154,31 +130,17 @@ func TestExtractInvalidDistributedContextFromHTTPReq(t *testing.T) {
 		{
 			name:   "invalid header with existing context",
 			header: "header2",
-			has: members{
-				{Key: "key1", Value: "val1"},
-				{Key: "key2", Value: "val2"},
+			hasKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2"),
 			},
 		},
 		{
 			name:   "empty header value",
 			header: "",
-			has: members{
-				{Key: "key1", Value: "val1"},
-				{Key: "key2", Value: "val2"},
-			},
-		},
-		{
-			name:   "with properties",
-			header: "key1=val1,key2=val2;prop=1",
-			has: members{
-				{Key: "key1", Value: "val1"},
-				{
-					Key:   "key2",
-					Value: "val2",
-					Properties: []property{
-						{Key: "prop", Value: "1"},
-					},
-				},
+			hasKVs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2"),
 			},
 		},
 	}
@@ -188,10 +150,26 @@ func TestExtractInvalidDistributedContextFromHTTPReq(t *testing.T) {
 			req, _ := http.NewRequest("GET", "http://example.com", nil)
 			req.Header.Set("baggage", tt.header)
 
-			expected := tt.has.Baggage(t)
-			ctx := baggage.ContextWithBaggage(context.Background(), expected)
+			ctx := baggage.NewContext(context.Background(), tt.hasKVs...)
+			wantBaggage := baggage.MapFromContext(ctx)
 			ctx = prop.Extract(ctx, propagation.HeaderCarrier(req.Header))
-			assert.Equal(t, expected, baggage.FromContext(ctx))
+			gotBaggage := baggage.MapFromContext(ctx)
+			if gotBaggage.Len() != wantBaggage.Len() {
+				t.Errorf(
+					"Got and Want Baggage are not the same size %d != %d",
+					gotBaggage.Len(),
+					wantBaggage.Len(),
+				)
+			}
+			totalDiff := ""
+			wantBaggage.Foreach(func(keyValue attribute.KeyValue) bool {
+				val, _ := gotBaggage.Value(keyValue.Key)
+				diff := cmp.Diff(keyValue, attribute.KeyValue{Key: keyValue.Key, Value: val}, cmp.AllowUnexported(attribute.Value{}))
+				if diff != "" {
+					totalDiff += diff + "\n"
+				}
+				return true
+			})
 		})
 	}
 }
@@ -200,50 +178,62 @@ func TestInjectBaggageToHTTPReq(t *testing.T) {
 	propagator := propagation.Baggage{}
 	tests := []struct {
 		name         string
-		mems         members
+		kvs          []attribute.KeyValue
 		wantInHeader []string
+		wantedLen    int
 	}{
 		{
 			name: "two simple values",
-			mems: members{
-				{Key: "key1", Value: "val1"},
-				{Key: "key2", Value: "val2"},
+			kvs: []attribute.KeyValue{
+				attribute.String("key1", "val1"),
+				attribute.String("key2", "val2"),
 			},
 			wantInHeader: []string{"key1=val1", "key2=val2"},
 		},
 		{
-			name: "values with escaped chars",
-			mems: members{
-				{Key: "key2", Value: "val3=4"},
+			name: "two values with escaped chars",
+			kvs: []attribute.KeyValue{
+				attribute.String("key1", "val1,val2"),
+				attribute.String("key2", "val3=4"),
 			},
-			wantInHeader: []string{"key2=val3%3D4"},
+			wantInHeader: []string{"key1=val1%2Cval2", "key2=val3%3D4"},
 		},
 		{
-			name: "with properties",
-			mems: members{
-				{Key: "key1", Value: "val1"},
-				{
-					Key:   "key2",
-					Value: "val2",
-					Properties: []property{
-						{Key: "prop", Value: "1"},
-					},
-				},
+			name: "values of non-string types",
+			kvs: []attribute.KeyValue{
+				attribute.Bool("key1", true),
+				attribute.Int("key2", 123),
+				attribute.Int64("key3", 123),
+				attribute.Float64("key4", 123.567),
 			},
 			wantInHeader: []string{
-				"key1=val1",
-				"key2=val2;prop=1",
+				"key1=true",
+				"key2=123",
+				"key3=123",
+				"key4=123.567",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req, _ := http.NewRequest("GET", "http://example.com", nil)
-			ctx := baggage.ContextWithBaggage(context.Background(), tt.mems.Baggage(t))
+			ctx := baggage.ContextWithMap(context.Background(), baggage.NewMap(baggage.MapUpdate{MultiKV: tt.kvs}))
 			propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-			got := strings.Split(req.Header.Get("baggage"), ",")
-			assert.ElementsMatch(t, tt.wantInHeader, got)
+			gotHeader := req.Header.Get("baggage")
+			wantedLen := len(strings.Join(tt.wantInHeader, ","))
+			if wantedLen != len(gotHeader) {
+				t.Errorf(
+					"%s: Inject baggage incorrect length %d != %d.", tt.name, tt.wantedLen, len(gotHeader),
+				)
+			}
+			for _, inHeader := range tt.wantInHeader {
+				if !strings.Contains(gotHeader, inHeader) {
+					t.Errorf(
+						"%s: Inject baggage missing part of header: %s in %s", tt.name, inHeader, gotHeader,
+					)
+				}
+			}
 		})
 	}
 }

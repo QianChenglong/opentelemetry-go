@@ -22,12 +22,10 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/sdk/instrumentation"
+	"go.opentelemetry.io/otel/metric/registry"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
 	sdk "go.opentelemetry.io/otel/sdk/metric"
 	controllerTime "go.opentelemetry.io/otel/sdk/metric/controller/time"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/registry"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
@@ -46,28 +44,26 @@ var ErrControllerStarted = fmt.Errorf("controller already started")
 // both "pull" and "push" configurations.  This supports two distinct
 // modes:
 //
-//   - Push and Pull: Start() must be called to begin calling the exporter;
-//     Collect() is called periodically by a background thread after starting
-//     the controller.
-//   - Pull-Only: Start() is optional in this case, to call Collect periodically.
-//     If Start() is not called, Collect() can be called manually to initiate
-//     collection
+// - Push and Pull: Start() must be called to begin calling the exporter;
+//   Collect() is called periodically by a background thread after starting
+//   the controller.
+// - Pull-Only: Start() is optional in this case, to call Collect periodically.
+//   If Start() is not called, Collect() can be called manually to initiate
+//   collection
 //
 // The controller supports mixing push and pull access to metric data
-// using the export.Reader RWLock interface.  Collection will
+// using the export.CheckpointSet RWLock interface.  Collection will
 // be blocked by a pull request in the basic controller.
 type Controller struct {
-	// lock synchronizes Start() and Stop().
-	lock                sync.Mutex
-	scopes              sync.Map
-	checkpointerFactory export.CheckpointerFactory
-
-	resource *resource.Resource
-	exporter export.Exporter
-	wg       sync.WaitGroup
-	stopCh   chan struct{}
-	clock    controllerTime.Clock
-	ticker   controllerTime.Ticker
+	lock         sync.Mutex
+	accumulator  *sdk.Accumulator
+	provider     *registry.MeterProvider
+	checkpointer export.Checkpointer
+	exporter     export.Exporter
+	wg           sync.WaitGroup
+	stopCh       chan struct{}
+	clock        controllerTime.Clock
+	ticker       controllerTime.Ticker
 
 	collectPeriod  time.Duration
 	collectTimeout time.Duration
@@ -78,68 +74,33 @@ type Controller struct {
 	collectedTime time.Time
 }
 
-var _ export.InstrumentationLibraryReader = &Controller{}
-var _ metric.MeterProvider = &Controller{}
-
-// Meter returns a new Meter defined by instrumentationName and configured
-// with opts.
-func (c *Controller) Meter(instrumentationName string, opts ...metric.MeterOption) metric.Meter {
-	cfg := metric.NewMeterConfig(opts...)
-	scope := instrumentation.Scope{
-		Name:      instrumentationName,
-		Version:   cfg.InstrumentationVersion(),
-		SchemaURL: cfg.SchemaURL(),
-	}
-
-	m, ok := c.scopes.Load(scope)
-	if !ok {
-		checkpointer := c.checkpointerFactory.NewCheckpointer()
-		m, _ = c.scopes.LoadOrStore(
-			scope,
-			registry.NewUniqueInstrumentMeterImpl(&accumulatorCheckpointer{
-				Accumulator:  sdk.NewAccumulator(checkpointer),
-				checkpointer: checkpointer,
-				scope:        scope,
-			}))
-	}
-	return sdkapi.WrapMeterImpl(m.(*registry.UniqueInstrumentMeterImpl))
-}
-
-type accumulatorCheckpointer struct {
-	*sdk.Accumulator
-	checkpointer export.Checkpointer
-	scope        instrumentation.Scope
-}
-
-var _ sdkapi.MeterImpl = &accumulatorCheckpointer{}
-
-// New constructs a Controller using the provided checkpointer factory
-// and options (including optional exporter) to configure a metric
+// New constructs a Controller using the provided checkpointer and
+// options (including optional exporter) to configure a metric
 // export pipeline.
-func New(checkpointerFactory export.CheckpointerFactory, opts ...Option) *Controller {
-	c := config{
+func New(checkpointer export.Checkpointer, opts ...Option) *Controller {
+	c := &Config{
 		CollectPeriod:  DefaultPeriod,
 		CollectTimeout: DefaultPeriod,
 		PushTimeout:    DefaultPeriod,
 	}
 	for _, opt := range opts {
-		c = opt.apply(c)
+		opt.Apply(c)
 	}
 	if c.Resource == nil {
 		c.Resource = resource.Default()
-	} else {
-		var err error
-		c.Resource, err = resource.Merge(resource.Environment(), c.Resource)
-		if err != nil {
-			otel.Handle(err)
-		}
 	}
+
+	impl := sdk.NewAccumulator(
+		checkpointer,
+		c.Resource,
+	)
 	return &Controller{
-		checkpointerFactory: checkpointerFactory,
-		exporter:            c.Exporter,
-		resource:            c.Resource,
-		stopCh:              nil,
-		clock:               controllerTime.RealClock{},
+		provider:     registry.NewMeterProvider(impl),
+		accumulator:  impl,
+		checkpointer: checkpointer,
+		exporter:     c.Exporter,
+		stopCh:       nil,
+		clock:        controllerTime.RealClock{},
 
 		collectPeriod:  c.CollectPeriod,
 		collectTimeout: c.CollectTimeout,
@@ -155,10 +116,9 @@ func (c *Controller) SetClock(clock controllerTime.Clock) {
 	c.clock = clock
 }
 
-// Resource returns the *resource.Resource associated with this
-// controller.
-func (c *Controller) Resource() *resource.Resource {
-	return c.resource
+// MeterProvider returns a MeterProvider instance for this controller.
+func (c *Controller) MeterProvider() metric.MeterProvider {
+	return c.provider
 }
 
 // Start begins a ticker that periodically collects and exports
@@ -195,23 +155,19 @@ func (c *Controller) Start(ctx context.Context) error {
 //
 // Note that Stop() will not cancel an ongoing collection or export.
 func (c *Controller) Stop(ctx context.Context) error {
-	if lastCollection := func() bool {
-		c.lock.Lock()
-		defer c.lock.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
-		if c.stopCh == nil {
-			return false
-		}
-
-		close(c.stopCh)
-		c.stopCh = nil
-		c.wg.Wait()
-		c.ticker.Stop()
-		c.ticker = nil
-		return true
-	}(); !lastCollection {
+	if c.stopCh == nil {
 		return nil
 	}
+
+	close(c.stopCh)
+	c.stopCh = nil
+	c.wg.Wait()
+	c.ticker.Stop()
+	c.ticker = nil
+
 	return c.collect(ctx)
 }
 
@@ -232,55 +188,35 @@ func (c *Controller) runTicker(ctx context.Context, stopCh chan struct{}) {
 
 // collect computes a checkpoint and optionally exports it.
 func (c *Controller) collect(ctx context.Context) error {
-	if err := c.checkpoint(ctx); err != nil {
+	if err := c.checkpoint(ctx, func() bool {
+		return true
+	}); err != nil {
 		return err
 	}
 	if c.exporter == nil {
 		return nil
 	}
-
 	// Note: this is not subject to collectTimeout.  This blocks the next
 	// collection despite collectTimeout because it holds a lock.
-	return c.export(ctx)
-}
-
-// accumulatorList returns a snapshot of current accumulators
-// registered to this controller.  This briefly locks the controller.
-func (c *Controller) accumulatorList() []*accumulatorCheckpointer {
-	var r []*accumulatorCheckpointer
-	c.scopes.Range(func(key, value interface{}) bool {
-		acc, ok := value.(*registry.UniqueInstrumentMeterImpl).MeterImpl().(*accumulatorCheckpointer)
-		if ok {
-			r = append(r, acc)
-		}
-		return true
-	})
-	return r
-}
-
-// checkpoint calls the Accumulator and Checkpointer interfaces to
-// compute the Reader.  This applies the configured collection
-// timeout.  Note that this does not try to cancel a Collect or Export
-// when Stop() is called.
-func (c *Controller) checkpoint(ctx context.Context) error {
-	for _, impl := range c.accumulatorList() {
-		if err := c.checkpointSingleAccumulator(ctx, impl); err != nil {
-			return err
-		}
+	if err := c.export(ctx); err != nil {
+		return err
 	}
 	return nil
 }
 
-// checkpointSingleAccumulator checkpoints a single instrumentation
-// scope's accumulator, which involves calling
-// checkpointer.StartCollection, accumulator.Collect, and
-// checkpointer.FinishCollection in sequence.
-func (c *Controller) checkpointSingleAccumulator(ctx context.Context, ac *accumulatorCheckpointer) error {
-	ckpt := ac.checkpointer.Reader()
+// checkpoint calls the Accumulator and Checkpointer interfaces to
+// compute the CheckpointSet.  This applies the configured collection
+// timeout.  Note that this does not try to cancel a Collect or Export
+// when Stop() is called.
+func (c *Controller) checkpoint(ctx context.Context, cond func() bool) error {
+	ckpt := c.checkpointer.CheckpointSet()
 	ckpt.Lock()
 	defer ckpt.Unlock()
 
-	ac.checkpointer.StartCollection()
+	if !cond() {
+		return nil
+	}
+	c.checkpointer.StartCollection()
 
 	if c.collectTimeout > 0 {
 		var cancel context.CancelFunc
@@ -288,7 +224,7 @@ func (c *Controller) checkpointSingleAccumulator(ctx context.Context, ac *accumu
 		defer cancel()
 	}
 
-	_ = ac.Accumulator.Collect(ctx)
+	_ = c.accumulator.Collect(ctx)
 
 	var err error
 	select {
@@ -299,7 +235,7 @@ func (c *Controller) checkpointSingleAccumulator(ctx context.Context, ac *accumu
 	}
 
 	// Finish the checkpoint whether the accumulator timed out or not.
-	if cerr := ac.checkpointer.FinishCollection(); cerr != nil {
+	if cerr := c.checkpointer.FinishCollection(); cerr != nil {
 		if err == nil {
 			err = cerr
 		} else {
@@ -310,36 +246,34 @@ func (c *Controller) checkpointSingleAccumulator(ctx context.Context, ac *accumu
 	return err
 }
 
-// export calls the exporter with a read lock on the Reader,
+// export calls the exporter with a read lock on the CheckpointSet,
 // applying the configured export timeout.
-func (c *Controller) export(ctx context.Context) error { // nolint:revive  // method name shadows import.
+func (c *Controller) export(ctx context.Context) error {
+	ckpt := c.checkpointer.CheckpointSet()
+	ckpt.RLock()
+	defer ckpt.RUnlock()
+
 	if c.pushTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.pushTimeout)
 		defer cancel()
 	}
 
-	return c.exporter.Export(ctx, c.resource, c)
+	return c.exporter.Export(ctx, ckpt)
 }
 
-// ForEach implements export.InstrumentationLibraryReader.
-func (c *Controller) ForEach(readerFunc func(l instrumentation.Library, r export.Reader) error) error {
-	for _, acPair := range c.accumulatorList() {
-		reader := acPair.checkpointer.Reader()
-		// TODO: We should not fail fast; instead accumulate errors.
-		if err := func() error {
-			reader.RLock()
-			defer reader.RUnlock()
-			return readerFunc(acPair.scope, reader)
-		}(); err != nil {
-			return err
-		}
-	}
-	return nil
+// Foreach gives the caller read-locked access to the current
+// export.CheckpointSet.
+func (c *Controller) ForEach(ks export.ExportKindSelector, f func(export.Record) error) error {
+	ckpt := c.checkpointer.CheckpointSet()
+	ckpt.RLock()
+	defer ckpt.RUnlock()
+
+	return ckpt.ForEach(ks, f)
 }
 
 // IsRunning returns true if the controller was started via Start(),
-// indicating that the current export.Reader is being kept
+// indicating that the current export.CheckpointSet is being kept
 // up-to-date.
 func (c *Controller) IsRunning() bool {
 	c.lock.Lock()
@@ -356,20 +290,16 @@ func (c *Controller) Collect(ctx context.Context) error {
 		// computing checkpoints with the collection period.
 		return ErrControllerStarted
 	}
-	if !c.shouldCollect() {
-		return nil
-	}
 
-	return c.checkpoint(ctx)
+	return c.checkpoint(ctx, c.shouldCollect)
 }
 
 // shouldCollect returns true if the collector should collect now,
 // based on the timestamp, the last collection time, and the
 // configured period.
 func (c *Controller) shouldCollect() bool {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
+	// This is called with the CheckpointSet exclusive
+	// lock held.
 	if c.collectPeriod == 0 {
 		return true
 	}

@@ -21,37 +21,32 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	"go.opencensus.io/metric/metricdata"
 	ocresource "go.opencensus.io/resource"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric/instrument"
-	"go.opentelemetry.io/otel/metric/unit"
-	"go.opentelemetry.io/otel/sdk/instrumentation"
-	"go.opentelemetry.io/otel/sdk/metric/controller/controllertest"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/metrictest"
-	"go.opentelemetry.io/otel/sdk/metric/number"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	exportmetric "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/unit"
 )
 
 type fakeExporter struct {
 	export.Exporter
-	records  []export.Record
-	resource *resource.Resource
-	err      error
+	records []export.Record
+	err     error
 }
 
-func (f *fakeExporter) Export(ctx context.Context, res *resource.Resource, ilr export.InstrumentationLibraryReader) error {
-	return controllertest.ReadAll(ilr, aggregation.StatelessTemporalitySelector(),
-		func(_ instrumentation.Library, record export.Record) error {
-			f.resource = res
-			f.records = append(f.records, record)
-			return f.err
-		})
+func (f *fakeExporter) Export(ctx context.Context, cps exportmetric.CheckpointSet) error {
+	return cps.ForEach(f, func(record exportmetric.Record) error {
+		f.records = append(f.records, record)
+		return f.err
+	})
 }
 
 type fakeErrorHandler struct {
@@ -73,10 +68,11 @@ func (f *fakeErrorHandler) matches(err error) error {
 
 func TestExportMetrics(t *testing.T) {
 	now := time.Now()
-	basicDesc := metrictest.NewDescriptor(
+	basicDesc := metric.NewDescriptor(
 		"",
-		sdkapi.GaugeObserverInstrumentKind,
+		metric.ValueObserverInstrumentKind,
 		number.Int64Kind,
+		metric.WithInstrumentationName("OpenCensus Bridge"),
 	)
 	fakeErrorHandler := &fakeErrorHandler{}
 	otel.SetErrorHandler(fakeErrorHandler)
@@ -85,7 +81,6 @@ func TestExportMetrics(t *testing.T) {
 		input                []*metricdata.Metric
 		exportErr            error
 		expected             []export.Record
-		expectedResource     *resource.Resource
 		expectedHandledError error
 	}{
 		{
@@ -110,12 +105,12 @@ func TestExportMetrics(t *testing.T) {
 			expectedHandledError: errConversion,
 		},
 		{
-			desc: "attrs conversion error",
+			desc: "labels conversion error",
 			input: []*metricdata.Metric{
 				{
-					// No descriptor with attribute keys.
+					// No descriptor with label keys.
 					TimeSeries: []*metricdata.TimeSeries{
-						// 1 attribute value, which doens't exist in keys.
+						// 1 label value, which doens't exist in keys.
 						{
 							LabelValues: []metricdata.LabelValue{{Value: "foo", Present: true}},
 							Points: []metricdata.Point{
@@ -140,18 +135,12 @@ func TestExportMetrics(t *testing.T) {
 					},
 				},
 			},
-			exportErr: errIncompatibleType,
+			expectedHandledError: errIncompatibleType,
 		},
 		{
 			desc: "success",
 			input: []*metricdata.Metric{
 				{
-					Resource: &ocresource.Resource{
-						Labels: map[string]string{
-							"R1": "V1",
-							"R2": "V2",
-						},
-					},
 					TimeSeries: []*metricdata.TimeSeries{
 						{
 							StartTime: now,
@@ -162,17 +151,18 @@ func TestExportMetrics(t *testing.T) {
 					},
 				},
 			},
-			expectedResource: resource.NewSchemaless(
-				attribute.String("R1", "V1"),
-				attribute.String("R2", "V2"),
-			),
 			expected: []export.Record{
 				export.NewRecord(
 					&basicDesc,
 					attribute.EmptySet(),
-					&ocRawAggregator{
-						value: number.NewInt64Number(123),
-						time:  now,
+					resource.NewWithAttributes(),
+					&ocExactAggregator{
+						points: []aggregation.Point{
+							{
+								Number: number.NewInt64Number(123),
+								Time:   now,
+							},
+						},
 					},
 					now,
 					now,
@@ -197,9 +187,14 @@ func TestExportMetrics(t *testing.T) {
 				export.NewRecord(
 					&basicDesc,
 					attribute.EmptySet(),
-					&ocRawAggregator{
-						value: number.NewInt64Number(123),
-						time:  now,
+					resource.NewWithAttributes(),
+					&ocExactAggregator{
+						points: []aggregation.Point{
+							{
+								Number: number.NewInt64Number(123),
+								Time:   now,
+							},
+						},
 					},
 					now,
 					now,
@@ -227,9 +222,14 @@ func TestExportMetrics(t *testing.T) {
 				export.NewRecord(
 					&basicDesc,
 					attribute.EmptySet(),
-					&ocRawAggregator{
-						value: number.NewInt64Number(123),
-						time:  now,
+					resource.NewWithAttributes(),
+					&ocExactAggregator{
+						points: []aggregation.Point{
+							{
+								Number: number.NewInt64Number(123),
+								Time:   now,
+							},
+						},
 					},
 					now,
 					now,
@@ -254,9 +254,6 @@ func TestExportMetrics(t *testing.T) {
 			if len(tc.expected) != len(output) {
 				t.Fatalf("ExportMetrics(%+v) = %d records, want %d records", tc.input, len(output), len(tc.expected))
 			}
-			if fakeExporter.resource.String() != tc.expectedResource.String() {
-				t.Errorf("ExportMetrics(%+v)[i].Resource() = %+v, want %+v", tc.input, fakeExporter.resource.String(), tc.expectedResource.String())
-			}
 			for i, expected := range tc.expected {
 				if output[i].StartTime() != expected.StartTime() {
 					t.Errorf("ExportMetrics(%+v)[i].StartTime() = %+v, want %+v", tc.input, output[i].StartTime(), expected.StartTime())
@@ -264,13 +261,16 @@ func TestExportMetrics(t *testing.T) {
 				if output[i].EndTime() != expected.EndTime() {
 					t.Errorf("ExportMetrics(%+v)[i].EndTime() = %+v, want %+v", tc.input, output[i].EndTime(), expected.EndTime())
 				}
+				if output[i].Resource().String() != expected.Resource().String() {
+					t.Errorf("ExportMetrics(%+v)[i].Resource() = %+v, want %+v", tc.input, output[i].Resource().String(), expected.Resource().String())
+				}
 				if output[i].Descriptor().Name() != expected.Descriptor().Name() {
 					t.Errorf("ExportMetrics(%+v)[i].Descriptor() = %+v, want %+v", tc.input, output[i].Descriptor().Name(), expected.Descriptor().Name())
 				}
 				// Don't bother with a complete check of the descriptor.
 				// That is checked as part of descriptor conversion tests below.
-				if !output[i].Attributes().Equals(expected.Attributes()) {
-					t.Errorf("ExportMetrics(%+v)[i].Attributes() = %+v, want %+v", tc.input, output[i].Attributes(), expected.Attributes())
+				if !output[i].Labels().Equals(expected.Labels()) {
+					t.Errorf("ExportMetrics(%+v)[i].Labels() = %+v, want %+v", tc.input, output[i].Labels(), expected.Labels())
 				}
 				if output[i].Aggregation().Kind() != expected.Aggregation().Kind() {
 					t.Errorf("ExportMetrics(%+v)[i].Aggregation() = %+v, want %+v", tc.input, output[i].Aggregation().Kind(), expected.Aggregation().Kind())
@@ -282,7 +282,7 @@ func TestExportMetrics(t *testing.T) {
 	}
 }
 
-func TestConvertAttributes(t *testing.T) {
+func TestConvertLabels(t *testing.T) {
 	setWithMultipleKeys := attribute.NewSet(
 		attribute.KeyValue{Key: attribute.Key("first"), Value: attribute.StringValue("1")},
 		attribute.KeyValue{Key: attribute.Key("second"), Value: attribute.StringValue("2")},
@@ -295,7 +295,7 @@ func TestConvertAttributes(t *testing.T) {
 		expectedErr error
 	}{
 		{
-			desc:     "no attributes",
+			desc:     "no labels",
 			expected: attribute.EmptySet(),
 		},
 		{
@@ -325,12 +325,12 @@ func TestConvertAttributes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
-			output, err := convertAttrs(tc.inputKeys, tc.inputValues)
+			output, err := convertLabels(tc.inputKeys, tc.inputValues)
 			if !errors.Is(err, tc.expectedErr) {
-				t.Errorf("convertAttrs(keys: %v, values: %v) = err(%v), want err(%v)", tc.inputKeys, tc.inputValues, err, tc.expectedErr)
+				t.Errorf("convertLabels(keys: %v, values: %v) = err(%v), want err(%v)", tc.inputKeys, tc.inputValues, err, tc.expectedErr)
 			}
 			if !output.Equals(tc.expected) {
-				t.Errorf("convertAttrs(keys: %v, values: %v) = %+v, want %+v", tc.inputKeys, tc.inputValues, output.ToSlice(), tc.expected.ToSlice())
+				t.Errorf("convertLabels(keys: %v, values: %v) = %+v, want %+v", tc.inputKeys, tc.inputValues, output.ToSlice(), tc.expected.ToSlice())
 			}
 		})
 	}
@@ -349,17 +349,17 @@ func TestConvertResource(t *testing.T) {
 			input: &ocresource.Resource{
 				Labels: map[string]string{},
 			},
-			expected: resource.NewSchemaless(),
+			expected: resource.NewWithAttributes(),
 		},
 		{
-			desc: "resource with attributes",
+			desc: "resource with labels",
 			input: &ocresource.Resource{
 				Labels: map[string]string{
 					"foo":  "bar",
 					"tick": "tock",
 				},
 			},
-			expected: resource.NewSchemaless(
+			expected: resource.NewWithAttributes(
 				attribute.KeyValue{Key: attribute.Key("foo"), Value: attribute.StringValue("bar")},
 				attribute.KeyValue{Key: attribute.Key("tick"), Value: attribute.StringValue("tock")},
 			),
@@ -377,15 +377,16 @@ func TestConvertDescriptor(t *testing.T) {
 	for _, tc := range []struct {
 		desc        string
 		input       metricdata.Descriptor
-		expected    sdkapi.Descriptor
+		expected    metric.Descriptor
 		expectedErr error
 	}{
 		{
 			desc: "empty descriptor",
-			expected: metrictest.NewDescriptor(
+			expected: metric.NewDescriptor(
 				"",
-				sdkapi.GaugeObserverInstrumentKind,
+				metric.ValueObserverInstrumentKind,
 				number.Int64Kind,
+				metric.WithInstrumentationName("OpenCensus Bridge"),
 			),
 		},
 		{
@@ -396,12 +397,13 @@ func TestConvertDescriptor(t *testing.T) {
 				Unit:        metricdata.UnitBytes,
 				Type:        metricdata.TypeGaugeInt64,
 			},
-			expected: metrictest.NewDescriptor(
+			expected: metric.NewDescriptor(
 				"foo",
-				sdkapi.GaugeObserverInstrumentKind,
+				metric.ValueObserverInstrumentKind,
 				number.Int64Kind,
-				instrument.WithDescription("bar"),
-				instrument.WithUnit(unit.Bytes),
+				metric.WithInstrumentationName("OpenCensus Bridge"),
+				metric.WithDescription("bar"),
+				metric.WithUnit(unit.Bytes),
 			),
 		},
 		{
@@ -412,12 +414,13 @@ func TestConvertDescriptor(t *testing.T) {
 				Unit:        metricdata.UnitMilliseconds,
 				Type:        metricdata.TypeGaugeFloat64,
 			},
-			expected: metrictest.NewDescriptor(
+			expected: metric.NewDescriptor(
 				"foo",
-				sdkapi.GaugeObserverInstrumentKind,
+				metric.ValueObserverInstrumentKind,
 				number.Float64Kind,
-				instrument.WithDescription("bar"),
-				instrument.WithUnit(unit.Milliseconds),
+				metric.WithInstrumentationName("OpenCensus Bridge"),
+				metric.WithDescription("bar"),
+				metric.WithUnit(unit.Milliseconds),
 			),
 		},
 		{
@@ -428,12 +431,13 @@ func TestConvertDescriptor(t *testing.T) {
 				Unit:        metricdata.UnitDimensionless,
 				Type:        metricdata.TypeCumulativeInt64,
 			},
-			expected: metrictest.NewDescriptor(
+			expected: metric.NewDescriptor(
 				"foo",
-				sdkapi.CounterObserverInstrumentKind,
+				metric.SumObserverInstrumentKind,
 				number.Int64Kind,
-				instrument.WithDescription("bar"),
-				instrument.WithUnit(unit.Dimensionless),
+				metric.WithInstrumentationName("OpenCensus Bridge"),
+				metric.WithDescription("bar"),
+				metric.WithUnit(unit.Dimensionless),
 			),
 		},
 		{
@@ -444,12 +448,13 @@ func TestConvertDescriptor(t *testing.T) {
 				Unit:        metricdata.UnitDimensionless,
 				Type:        metricdata.TypeCumulativeFloat64,
 			},
-			expected: metrictest.NewDescriptor(
+			expected: metric.NewDescriptor(
 				"foo",
-				sdkapi.CounterObserverInstrumentKind,
+				metric.SumObserverInstrumentKind,
 				number.Float64Kind,
-				instrument.WithDescription("bar"),
-				instrument.WithUnit(unit.Dimensionless),
+				metric.WithInstrumentationName("OpenCensus Bridge"),
+				metric.WithDescription("bar"),
+				metric.WithUnit(unit.Dimensionless),
 			),
 		},
 		{

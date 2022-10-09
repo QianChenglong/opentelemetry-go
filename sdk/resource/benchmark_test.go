@@ -25,7 +25,7 @@ import (
 
 const conflict = 0.5
 
-func makeAttrs(n int) (_, _ *resource.Resource) {
+func makeLabels(n int) (_, _ *resource.Resource) {
 	used := map[string]bool{}
 	l1 := make([]attribute.KeyValue, n)
 	l2 := make([]attribute.KeyValue, n)
@@ -45,18 +45,19 @@ func makeAttrs(n int) (_, _ *resource.Resource) {
 		} else {
 			l2[i] = attribute.String(k, fmt.Sprint("v", rand.Intn(1000000000)))
 		}
+
 	}
-	return resource.NewSchemaless(l1...), resource.NewSchemaless(l2...)
+	return resource.NewWithAttributes(l1...), resource.NewWithAttributes(l2...)
 }
 
 func benchmarkMergeResource(b *testing.B, size int) {
-	r1, r2 := makeAttrs(size)
+	r1, r2 := makeLabels(size)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, _ = resource.Merge(r1, r2)
+		_ = resource.Merge(r1, r2)
 	}
 }
 

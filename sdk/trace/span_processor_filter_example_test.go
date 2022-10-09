@@ -67,7 +67,7 @@ func (f InstrumentationBlacklist) ForceFlush(ctx context.Context) error {
 	return f.Next.ForceFlush(ctx)
 }
 func (f InstrumentationBlacklist) OnEnd(s ReadOnlySpan) {
-	if f.Blacklist != nil && f.Blacklist[s.InstrumentationScope().Name] {
+	if f.Blacklist != nil && f.Blacklist[s.InstrumentationLibrary().Name] {
 		// Drop spans from this instrumentation
 		return
 	}
@@ -76,8 +76,8 @@ func (f InstrumentationBlacklist) OnEnd(s ReadOnlySpan) {
 
 type noopExporter struct{}
 
-func (noopExporter) ExportSpans(context.Context, []ReadOnlySpan) error { return nil }
-func (noopExporter) Shutdown(context.Context) error                    { return nil }
+func (noopExporter) ExportSpans(context.Context, []*SpanSnapshot) error { return nil }
+func (noopExporter) Shutdown(context.Context) error                     { return nil }
 
 func ExampleSpanProcessor_filtered() {
 	exportSP := NewSimpleSpanProcessor(noopExporter{})

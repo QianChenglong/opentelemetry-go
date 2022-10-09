@@ -19,49 +19,34 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/google/go-cmp/cmp"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/oteltest"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
-var (
-	traceparent = http.CanonicalHeaderKey("traceparent")
-	tracestate  = http.CanonicalHeaderKey("tracestate")
-
-	prop = propagation.TraceContext{}
-)
-
-type testcase struct {
-	name   string
-	header http.Header
-	sc     trace.SpanContext
-}
-
-func TestExtractValidTraceContext(t *testing.T) {
-	stateStr := "key1=value1,key2=value2"
-	state, err := trace.ParseTraceState(stateStr)
-	require.NoError(t, err)
-
-	tests := []testcase{
+func TestExtractValidTraceContextFromHTTPReq(t *testing.T) {
+	prop := propagation.TraceContext{}
+	tests := []struct {
+		name   string
+		header string
+		wantSc trace.SpanContext
+	}{
 		{
-			name: "not sampled",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
+			name:   "valid w3cHeader",
+			header: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID: traceID,
 				SpanID:  spanID,
 				Remote:  true,
 			}),
 		},
 		{
-			name: "sampled",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
+			name:   "valid w3cHeader and sampled",
+			header: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID:    traceID,
 				SpanID:     spanID,
 				TraceFlags: trace.FlagsSampled,
@@ -69,47 +54,9 @@ func TestExtractValidTraceContext(t *testing.T) {
 			}),
 		},
 		{
-			name: "valid tracestate",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
-				tracestate:  []string{stateStr},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID:    traceID,
-				SpanID:     spanID,
-				TraceState: state,
-				Remote:     true,
-			}),
-		},
-		{
-			name: "invalid tracestate perserves traceparent",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
-				tracestate:  []string{"invalid$@#=invalid"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: traceID,
-				SpanID:  spanID,
-				Remote:  true,
-			}),
-		},
-		{
-			name: "future version not sampled",
-			header: http.Header{
-				traceparent: []string{"02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: traceID,
-				SpanID:  spanID,
-				Remote:  true,
-			}),
-		},
-		{
-			name: "future version sampled",
-			header: http.Header{
-				traceparent: []string{"02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
+			name:   "future version",
+			header: "02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID:    traceID,
 				SpanID:     spanID,
 				TraceFlags: trace.FlagsSampled,
@@ -117,11 +64,9 @@ func TestExtractValidTraceContext(t *testing.T) {
 			}),
 		},
 		{
-			name: "future version sample bit set",
-			header: http.Header{
-				traceparent: []string{"02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-09"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
+			name:   "future options with sampled bit set",
+			header: "02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-09",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID:    traceID,
 				SpanID:     spanID,
 				TraceFlags: trace.FlagsSampled,
@@ -129,61 +74,64 @@ func TestExtractValidTraceContext(t *testing.T) {
 			}),
 		},
 		{
-			name: "future version sample bit not set",
-			header: http.Header{
-				traceparent: []string{"02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-08"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
+			name:   "future options with sampled bit cleared",
+			header: "02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-08",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID: traceID,
 				SpanID:  spanID,
 				Remote:  true,
 			}),
 		},
 		{
-			name: "future version additional data",
-			header: http.Header{
-				traceparent: []string{"02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00-XYZxsf09"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: traceID,
-				SpanID:  spanID,
-				Remote:  true,
+			name:   "future additional data",
+			header: "02-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-09-XYZxsf09",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    traceID,
+				SpanID:     spanID,
+				TraceFlags: trace.FlagsSampled,
+				Remote:     true,
 			}),
 		},
 		{
-			name: "B3 format ending in dash",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00-"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: traceID,
-				SpanID:  spanID,
-				Remote:  true,
+			name:   "valid b3Header ending in dash",
+			header: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    traceID,
+				SpanID:     spanID,
+				TraceFlags: trace.FlagsSampled,
+				Remote:     true,
 			}),
 		},
 		{
-			name: "future version B3 format ending in dash",
-			header: http.Header{
-				traceparent: []string{"03-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00-"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: traceID,
-				SpanID:  spanID,
-				Remote:  true,
+			name:   "future valid b3Header ending in dash",
+			header: "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-09-",
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    traceID,
+				SpanID:     spanID,
+				TraceFlags: trace.FlagsSampled,
+				Remote:     true,
 			}),
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "http://example.com", nil)
+			req.Header.Set("traceparent", tt.header)
+
 			ctx := context.Background()
-			ctx = prop.Extract(ctx, propagation.HeaderCarrier(tc.header))
-			assert.Equal(t, tc.sc, trace.SpanContextFromContext(ctx))
+			ctx = prop.Extract(ctx, propagation.HeaderCarrier(req.Header))
+			gotSc := trace.SpanContextFromContext(ctx)
+			if diff := cmp.Diff(gotSc, tt.wantSc, cmp.Comparer(func(sc, other trace.SpanContext) bool { return sc.Equal(other) })); diff != "" {
+				t.Errorf("Extract Tracecontext: %s: -got +want %s", tt.name, diff)
+			}
 		})
 	}
 }
 
 func TestExtractInvalidTraceContextFromHTTPReq(t *testing.T) {
+	wantSc := trace.SpanContext{}
+	prop := propagation.TraceContext{}
 	tests := []struct {
 		name   string
 		header string
@@ -254,100 +202,172 @@ func TestExtractInvalidTraceContextFromHTTPReq(t *testing.T) {
 		},
 	}
 
-	empty := trace.SpanContext{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := http.Header{traceparent: []string{tt.header}}
-			ctx := context.Background()
-			ctx = prop.Extract(ctx, propagation.HeaderCarrier(h))
+			req, _ := http.NewRequest("GET", "http://example.com", nil)
+			req.Header.Set("traceparent", tt.header)
 
-			// Failure to extract needs to result in no SpanContext being set.
-			// This cannot be directly measured, but we can check that an
-			// zero-value SpanContext is returned from SpanContextFromContext.
-			assert.Equal(t, empty, trace.SpanContextFromContext(ctx))
+			ctx := context.Background()
+			ctx = prop.Extract(ctx, propagation.HeaderCarrier(req.Header))
+			gotSc := trace.SpanContextFromContext(ctx)
+			if diff := cmp.Diff(gotSc, wantSc, cmp.AllowUnexported(trace.TraceState{})); diff != "" {
+				t.Errorf("Extract Tracecontext: %s: -got +want %s", tt.name, diff)
+			}
 		})
 	}
 }
 
-func TestInjectValidTraceContext(t *testing.T) {
-	stateStr := "key1=value1,key2=value2"
-	state, err := trace.ParseTraceState(stateStr)
-	require.NoError(t, err)
-
-	tests := []testcase{
+func TestInjectTraceContextToHTTPReq(t *testing.T) {
+	mockTracer := oteltest.DefaultTracer()
+	prop := propagation.TraceContext{}
+	tests := []struct {
+		name       string
+		sc         trace.SpanContext
+		wantHeader string
+	}{
 		{
-			name: "not sampled",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
-			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
-				TraceID: traceID,
-				SpanID:  spanID,
-				Remote:  true,
-			}),
-		},
-		{
-			name: "sampled",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
-			},
+			name: "valid spancontext, sampled",
 			sc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID:    traceID,
 				SpanID:     spanID,
 				TraceFlags: trace.FlagsSampled,
-				Remote:     true,
 			}),
+			wantHeader: "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000002-01",
 		},
 		{
-			name: "unsupported trace flag bits dropped",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
-			},
+			name: "valid spancontext, not sampled",
+			sc: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: traceID,
+				SpanID:  spanID,
+			}),
+			wantHeader: "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000003-00",
+		},
+		{
+			name: "valid spancontext, with unsupported bit set in traceflags",
 			sc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID:    traceID,
 				SpanID:     spanID,
 				TraceFlags: 0xff,
-				Remote:     true,
 			}),
+			wantHeader: "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000004-01",
 		},
 		{
-			name: "with tracestate",
-			header: http.Header{
-				traceparent: []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
-				tracestate:  []string{stateStr},
+			name:       "invalid spancontext",
+			sc:         trace.SpanContext{},
+			wantHeader: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "http://example.com", nil)
+			ctx := context.Background()
+			if tt.sc.IsValid() {
+				ctx = trace.ContextWithRemoteSpanContext(ctx, tt.sc)
+				ctx, _ = mockTracer.Start(ctx, "inject")
+			}
+			prop.Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+			gotHeader := req.Header.Get("traceparent")
+			if diff := cmp.Diff(gotHeader, tt.wantHeader); diff != "" {
+				t.Errorf("Extract Tracecontext: %s: -got +want %s", tt.name, diff)
+			}
+		})
+	}
+}
+
+func TestTraceContextPropagator_GetAllKeys(t *testing.T) {
+	var propagator propagation.TraceContext
+	want := []string{"traceparent", "tracestate"}
+	got := propagator.Fields()
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Errorf("GetAllKeys: -got +want %s", diff)
+	}
+}
+
+func TestTraceStatePropagation(t *testing.T) {
+	prop := propagation.TraceContext{}
+	stateHeader := "tracestate"
+	parentHeader := "traceparent"
+	state, err := trace.TraceStateFromKeyValues(attribute.String("key1", "value1"), attribute.String("key2", "value2"))
+	if err != nil {
+		t.Fatalf("Unable to construct expected TraceState: %s", err.Error())
+	}
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		valid   bool
+		wantSc  trace.SpanContext
+	}{
+		{
+			name: "valid parent and state",
+			headers: map[string]string{
+				parentHeader: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+				stateHeader:  "key1=value1,key2=value2",
 			},
-			sc: trace.NewSpanContext(trace.SpanContextConfig{
+			valid: true,
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
 				TraceID:    traceID,
 				SpanID:     spanID,
 				TraceState: state,
 				Remote:     true,
 			}),
 		},
+		{
+			name: "valid parent, invalid state",
+			headers: map[string]string{
+				parentHeader: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+				stateHeader:  "key1=value1,invalid$@#=invalid",
+			},
+			valid: false,
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: traceID,
+				SpanID:  spanID,
+				Remote:  true,
+			}),
+		},
+		{
+			name: "valid parent, malformed state",
+			headers: map[string]string{
+				parentHeader: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+				stateHeader:  "key1=value1,invalid",
+			},
+			valid: false,
+			wantSc: trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID: traceID,
+				SpanID:  spanID,
+				Remote:  true,
+			}),
+		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			ctx = trace.ContextWithRemoteSpanContext(ctx, tc.sc)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inReq, _ := http.NewRequest(http.MethodGet, "http://example.com", nil)
+			for hk, hv := range tt.headers {
+				inReq.Header.Add(hk, hv)
+			}
 
-			h := http.Header{}
-			prop.Inject(ctx, propagation.HeaderCarrier(h))
-			assert.Equal(t, tc.header, h)
+			ctx := prop.Extract(context.Background(), propagation.HeaderCarrier(inReq.Header))
+			if diff := cmp.Diff(
+				trace.SpanContextFromContext(ctx),
+				tt.wantSc,
+				cmp.AllowUnexported(attribute.Value{}),
+				cmp.AllowUnexported(trace.TraceState{}),
+			); diff != "" {
+				t.Errorf("Extracted tracestate: -got +want %s", diff)
+			}
+
+			if tt.valid {
+				mockTracer := oteltest.DefaultTracer()
+				ctx, _ = mockTracer.Start(ctx, "inject")
+				outReq, _ := http.NewRequest(http.MethodGet, "http://www.example.com", nil)
+				prop.Inject(ctx, propagation.HeaderCarrier(outReq.Header))
+
+				if diff := cmp.Diff(outReq.Header.Get(stateHeader), tt.headers[stateHeader]); diff != "" {
+					t.Errorf("Propagated tracestate: -got +want %s", diff)
+				}
+			}
 		})
 	}
-}
-
-func TestInvalidSpanContextDropped(t *testing.T) {
-	invalidSC := trace.SpanContext{}
-	require.False(t, invalidSC.IsValid())
-	ctx := trace.ContextWithRemoteSpanContext(context.Background(), invalidSC)
-
-	header := http.Header{}
-	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
-	assert.Equal(t, "", header.Get("traceparent"), "injected invalid SpanContext")
-}
-
-func TestTraceContextFields(t *testing.T) {
-	expected := []string{"traceparent", "tracestate"}
-	assert.Equal(t, expected, propagation.TraceContext{}.Fields())
 }

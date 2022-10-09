@@ -19,10 +19,11 @@ import (
 	"sort"
 	"sync"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/number"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 )
 
 // Note: This code uses a Mutex to govern access to the exclusive
@@ -88,7 +89,7 @@ var defaultFloat64ExplicitBoundaries = []float64{.005, .01, .025, .05, .1, .25, 
 const defaultInt64ExplicitBoundaryMultiplier = 1e6
 
 // defaultInt64ExplicitBoundaries applies a multiplier to the default
-// float64 boundaries: [ 5K, 10K, 25K, ..., 2.5M, 5M, 10M ].
+// float64 boundaries: [ 5K, 10K, 25K, ..., 2.5M, 5M, 10M ]
 var defaultInt64ExplicitBoundaries = func(bounds []float64) (asint []float64) {
 	for _, f := range bounds {
 		asint = append(asint, defaultInt64ExplicitBoundaryMultiplier*f)
@@ -96,7 +97,7 @@ var defaultInt64ExplicitBoundaries = func(bounds []float64) (asint []float64) {
 	return
 }(defaultFloat64ExplicitBoundaries)
 
-var _ aggregator.Aggregator = &Aggregator{}
+var _ export.Aggregator = &Aggregator{}
 var _ aggregation.Sum = &Aggregator{}
 var _ aggregation.Count = &Aggregator{}
 var _ aggregation.Histogram = &Aggregator{}
@@ -109,7 +110,7 @@ var _ aggregation.Histogram = &Aggregator{}
 // Note that this aggregator maintains each value using independent
 // atomic operations, which introduces the possibility that
 // checkpoints are inconsistent.
-func New(cnt int, desc *sdkapi.Descriptor, opts ...Option) []Aggregator {
+func New(cnt int, desc *metric.Descriptor, opts ...Option) []Aggregator {
 	var cfg config
 
 	if desc.NumberKind() == number.Int64Kind {
@@ -173,7 +174,7 @@ func (c *Aggregator) Histogram() (aggregation.Buckets, error) {
 // the empty set.  Since no locks are taken, there is a chance that
 // the independent Sum, Count and Bucket Count are not consistent with each
 // other.
-func (c *Aggregator) SynchronizedMove(oa aggregator.Aggregator, desc *sdkapi.Descriptor) error {
+func (c *Aggregator) SynchronizedMove(oa export.Aggregator, desc *metric.Descriptor) error {
 	o, _ := oa.(*Aggregator)
 
 	if oa != nil && o == nil {
@@ -219,9 +220,9 @@ func (c *Aggregator) clearState() {
 }
 
 // Update adds the recorded measurement to the current data set.
-func (c *Aggregator) Update(_ context.Context, n number.Number, desc *sdkapi.Descriptor) error {
+func (c *Aggregator) Update(_ context.Context, number number.Number, desc *metric.Descriptor) error {
 	kind := desc.NumberKind()
-	asFloat := n.CoerceToFloat64(kind)
+	asFloat := number.CoerceToFloat64(kind)
 
 	bucketID := len(c.boundaries)
 	for i, boundary := range c.boundaries {
@@ -246,14 +247,14 @@ func (c *Aggregator) Update(_ context.Context, n number.Number, desc *sdkapi.Des
 	defer c.lock.Unlock()
 
 	c.state.count++
-	c.state.sum.AddNumber(kind, n)
+	c.state.sum.AddNumber(kind, number)
 	c.state.bucketCounts[bucketID]++
 
 	return nil
 }
 
 // Merge combines two histograms that have the same buckets into a single one.
-func (c *Aggregator) Merge(oa aggregator.Aggregator, desc *sdkapi.Descriptor) error {
+func (c *Aggregator) Merge(oa export.Aggregator, desc *metric.Descriptor) error {
 	o, _ := oa.(*Aggregator)
 	if o == nil {
 		return aggregator.NewInconsistentAggregatorError(c, oa)

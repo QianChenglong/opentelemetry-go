@@ -22,38 +22,40 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/sdk/instrumentation"
-	"go.opentelemetry.io/otel/sdk/metric/aggregator"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
+	"go.opentelemetry.io/otel/sdk/metric/aggregator/exact"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator/histogram"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator/lastvalue"
+	"go.opentelemetry.io/otel/sdk/metric/aggregator/minmaxsumcount"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator/sum"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
 type (
-	// mapKey is the unique key for a metric, consisting of its unique
-	// descriptor, distinct attributes, and distinct resource attributes.
+	// mapKey is the unique key for a metric, consisting of its
+	// unique descriptor, distinct labels, and distinct resource
+	// attributes.
 	mapKey struct {
-		desc     *sdkapi.Descriptor
-		attrs    attribute.Distinct
+		desc     *metric.Descriptor
+		labels   attribute.Distinct
 		resource attribute.Distinct
 	}
 
 	// mapValue is value stored in a processor used to produce a
-	// Reader.
+	// CheckpointSet.
 	mapValue struct {
-		attrs      *attribute.Set
+		labels     *attribute.Set
 		resource   *resource.Resource
-		aggregator aggregator.Aggregator
+		aggregator export.Aggregator
 	}
 
-	// Output implements export.Reader.
+	// Output implements export.CheckpointSet.
 	Output struct {
-		m           map[mapKey]mapValue
-		attrEncoder attribute.Encoder
+		m            map[mapKey]mapValue
+		labelEncoder attribute.Encoder
 		sync.RWMutex
 	}
 
@@ -79,7 +81,7 @@ type (
 	// Exporter is a testing implementation of export.Exporter that
 	// assembles its results as a map[string]float64.
 	Exporter struct {
-		aggregation.TemporalitySelector
+		export.ExportKindSelector
 		output      *Output
 		exportCount int
 
@@ -90,39 +92,14 @@ type (
 	}
 )
 
-type testFactory struct {
-	selector export.AggregatorSelector
-	encoder  attribute.Encoder
-}
-
-// NewCheckpointerFactory returns a new CheckpointerFactory for the selector
-// and encoder pair.
-func NewCheckpointerFactory(selector export.AggregatorSelector, encoder attribute.Encoder) export.CheckpointerFactory {
-	return testFactory{
-		selector: selector,
-		encoder:  encoder,
-	}
-}
-
-// NewCheckpointer returns a new Checkpointer for Processor p.
-func NewCheckpointer(p *Processor) export.Checkpointer {
-	return &testCheckpointer{
-		Processor: p,
-	}
-}
-
-func (f testFactory) NewCheckpointer() export.Checkpointer {
-	return NewCheckpointer(NewProcessor(f.selector, f.encoder))
-}
-
 // NewProcessor returns a new testing Processor implementation.
 // Verify expected outputs using Values(), e.g.:
 //
-//	require.EqualValues(t, map[string]float64{
-//	    "counter.sum/A=1,B=2/R=V": 100,
-//	}, processor.Values())
+//     require.EqualValues(t, map[string]float64{
+//         "counter.sum/A=1,B=2/R=V": 100,
+//     }, processor.Values())
 //
-// Where in the example A=1,B=2 is the encoded attributes and R=V is the
+// Where in the example A=1,B=2 is the encoded labels and R=V is the
 // encoded resource value.
 func NewProcessor(selector export.AggregatorSelector, encoder attribute.Encoder) *Processor {
 	return &Processor{
@@ -136,17 +113,20 @@ func (p *Processor) Process(accum export.Accumulation) error {
 	return p.output.AddAccumulation(accum)
 }
 
-// Values returns the mapping from attribute set to point values for the
-// accumulations that were processed. Point values are chosen as either the
-// Sum or the LastValue, whichever is implemented. (All the built-in
-// Aggregators implement one of these interfaces.)
+// Values returns the mapping from label set to point values for the
+// accumulations that were processed.  Point values are chosen as
+// either the Sum or the LastValue, whichever is implemented.  (All
+// the built-in Aggregators implement one of these interfaces.)
 func (p *Processor) Values() map[string]float64 {
 	return p.output.Map()
 }
 
-// Reset clears the state of this test processor.
-func (p *Processor) Reset() {
-	p.output.Reset()
+// Checkpointer returns a checkpointer that computes a single
+// interval.
+func Checkpointer(p *Processor) export.Checkpointer {
+	return &testCheckpointer{
+		Processor: p,
+	}
 }
 
 // StartCollection implements export.Checkpointer.
@@ -168,8 +148,8 @@ func (c *testCheckpointer) FinishCollection() error {
 	return nil
 }
 
-// Reader implements export.Checkpointer.
-func (c *testCheckpointer) Reader() export.Reader {
+// CheckpointSet implements export.Checkpointer.
+func (c *testCheckpointer) CheckpointSet() export.CheckpointSet {
 	return c.Processor.output
 }
 
@@ -181,7 +161,8 @@ func AggregatorSelector() export.AggregatorSelector {
 }
 
 // AggregatorFor implements export.AggregatorSelector.
-func (testAggregatorSelector) AggregatorFor(desc *sdkapi.Descriptor, aggPtrs ...*aggregator.Aggregator) {
+func (testAggregatorSelector) AggregatorFor(desc *metric.Descriptor, aggPtrs ...*export.Aggregator) {
+
 	switch {
 	case strings.HasSuffix(desc.Name(), ".disabled"):
 		for i := range aggPtrs {
@@ -189,6 +170,11 @@ func (testAggregatorSelector) AggregatorFor(desc *sdkapi.Descriptor, aggPtrs ...
 		}
 	case strings.HasSuffix(desc.Name(), ".sum"):
 		aggs := sum.New(len(aggPtrs))
+		for i := range aggPtrs {
+			*aggPtrs[i] = &aggs[i]
+		}
+	case strings.HasSuffix(desc.Name(), ".minmaxsumcount"):
+		aggs := minmaxsumcount.New(len(aggPtrs), desc)
 		for i := range aggPtrs {
 			*aggPtrs[i] = &aggs[i]
 		}
@@ -202,6 +188,11 @@ func (testAggregatorSelector) AggregatorFor(desc *sdkapi.Descriptor, aggPtrs ...
 		for i := range aggPtrs {
 			*aggPtrs[i] = &aggs[i]
 		}
+	case strings.HasSuffix(desc.Name(), ".exact"):
+		aggs := exact.New(len(aggPtrs))
+		for i := range aggPtrs {
+			*aggPtrs[i] = &aggs[i]
+		}
 	default:
 		panic(fmt.Sprint("Invalid instrument name for test AggregatorSelector: ", desc.Name()))
 	}
@@ -211,19 +202,20 @@ func (testAggregatorSelector) AggregatorFor(desc *sdkapi.Descriptor, aggPtrs ...
 // (from an Accumulator) or an expected set of Records (from a
 // Processor).  If testing with an Accumulator, it may be simpler to
 // use the test Processor in this package.
-func NewOutput(attrEncoder attribute.Encoder) *Output {
+func NewOutput(labelEncoder attribute.Encoder) *Output {
 	return &Output{
-		m:           make(map[mapKey]mapValue),
-		attrEncoder: attrEncoder,
+		m:            make(map[mapKey]mapValue),
+		labelEncoder: labelEncoder,
 	}
 }
 
-// ForEach implements export.Reader.
-func (o *Output) ForEach(_ aggregation.TemporalitySelector, ff func(export.Record) error) error {
+// ForEach implements export.CheckpointSet.
+func (o *Output) ForEach(_ export.ExportKindSelector, ff func(export.Record) error) error {
 	for key, value := range o.m {
 		if err := ff(export.NewRecord(
 			key.desc,
-			value.attrs,
+			value.labels,
+			value.resource,
 			value.aggregator.Aggregation(),
 			time.Time{},
 			time.Time{},
@@ -239,31 +231,21 @@ func (o *Output) ForEach(_ aggregation.TemporalitySelector, ff func(export.Recor
 // either the Sum() or the LastValue() of its Aggregation(), whichever
 // is defined.  Record timestamps are ignored.
 func (o *Output) AddRecord(rec export.Record) error {
-	return o.AddRecordWithResource(rec, resource.Empty())
-}
-
-// AddRecordWithResource merges rec into this Output.
-func (o *Output) AddInstrumentationLibraryRecord(_ instrumentation.Library, rec export.Record) error {
-	return o.AddRecordWithResource(rec, resource.Empty())
-}
-
-// AddRecordWithResource merges rec into this Output scoping it with res.
-func (o *Output) AddRecordWithResource(rec export.Record, res *resource.Resource) error {
 	key := mapKey{
 		desc:     rec.Descriptor(),
-		attrs:    rec.Attributes().Equivalent(),
-		resource: res.Equivalent(),
+		labels:   rec.Labels().Equivalent(),
+		resource: rec.Resource().Equivalent(),
 	}
 	if _, ok := o.m[key]; !ok {
-		var agg aggregator.Aggregator
+		var agg export.Aggregator
 		testAggregatorSelector{}.AggregatorFor(rec.Descriptor(), &agg)
 		o.m[key] = mapValue{
 			aggregator: agg,
-			attrs:      rec.Attributes(),
-			resource:   res,
+			labels:     rec.Labels(),
+			resource:   rec.Resource(),
 		}
 	}
-	return o.m[key].aggregator.Merge(rec.Aggregation().(aggregator.Aggregator), rec.Descriptor())
+	return o.m[key].aggregator.Merge(rec.Aggregation().(export.Aggregator), rec.Descriptor())
 }
 
 // Map returns the calculated values for test validation from a set of
@@ -272,10 +254,10 @@ func (o *Output) AddRecordWithResource(rec export.Record, res *resource.Resource
 // is chosen, whichever is implemented by the underlying Aggregator.
 func (o *Output) Map() map[string]float64 {
 	r := make(map[string]float64)
-	err := o.ForEach(aggregation.StatelessTemporalitySelector(), func(record export.Record) error {
+	err := o.ForEach(export.StatelessExportKindSelector(), func(record export.Record) error {
 		for key, entry := range o.m {
-			encoded := entry.attrs.Encoded(o.attrEncoder)
-			rencoded := entry.resource.Encoded(o.attrEncoder)
+			encoded := entry.labels.Encoded(o.labelEncoder)
+			rencoded := entry.resource.Encoded(o.labelEncoder)
 			value := 0.0
 			if s, ok := entry.aggregator.(aggregation.Sum); ok {
 				sum, _ := s.Sum()
@@ -283,6 +265,13 @@ func (o *Output) Map() map[string]float64 {
 			} else if l, ok := entry.aggregator.(aggregation.LastValue); ok {
 				last, _, _ := l.LastValue()
 				value = last.CoerceToFloat64(key.desc.NumberKind())
+			} else if l, ok := entry.aggregator.(aggregation.Points); ok {
+				pts, _ := l.Points()
+				var sum number.Number
+				for _, s := range pts {
+					sum.AddNumber(key.desc.NumberKind(), s.Number)
+				}
+				value = sum.CoerceToFloat64(key.desc.NumberKind())
 			} else {
 				panic(fmt.Sprintf("Unhandled aggregator type: %T", entry.aggregator))
 			}
@@ -311,7 +300,8 @@ func (o *Output) AddAccumulation(acc export.Accumulation) error {
 	return o.AddRecord(
 		export.NewRecord(
 			acc.Descriptor(),
-			acc.Attributes(),
+			acc.Labels(),
+			acc.Resource(),
 			acc.Aggregator().Aggregation(),
 			time.Time{},
 			time.Time{},
@@ -319,43 +309,40 @@ func (o *Output) AddAccumulation(acc export.Accumulation) error {
 	)
 }
 
-// New returns a new testing Exporter implementation.
+// NewExporter returns a new testing Exporter implementation.
 // Verify exporter outputs using Values(), e.g.,:
 //
-//	require.EqualValues(t, map[string]float64{
-//	    "counter.sum/A=1,B=2/R=V": 100,
-//	}, exporter.Values())
+//     require.EqualValues(t, map[string]float64{
+//         "counter.sum/A=1,B=2/R=V": 100,
+//     }, exporter.Values())
 //
-// Where in the example A=1,B=2 is the encoded attributes and R=V is the
+// Where in the example A=1,B=2 is the encoded labels and R=V is the
 // encoded resource value.
-func New(selector aggregation.TemporalitySelector, encoder attribute.Encoder) *Exporter {
+func NewExporter(selector export.ExportKindSelector, encoder attribute.Encoder) *Exporter {
 	return &Exporter{
-		TemporalitySelector: selector,
-		output:              NewOutput(encoder),
+		ExportKindSelector: selector,
+		output:             NewOutput(encoder),
 	}
 }
 
-// Export records all the measurements aggregated in ckpt for res.
-func (e *Exporter) Export(_ context.Context, res *resource.Resource, ckpt export.InstrumentationLibraryReader) error {
+func (e *Exporter) Export(_ context.Context, ckpt export.CheckpointSet) error {
 	e.output.Lock()
 	defer e.output.Unlock()
 	e.exportCount++
-	return ckpt.ForEach(func(library instrumentation.Library, mr export.Reader) error {
-		return mr.ForEach(e.TemporalitySelector, func(r export.Record) error {
-			if e.InjectErr != nil {
-				if err := e.InjectErr(r); err != nil {
-					return err
-				}
+	return ckpt.ForEach(e.ExportKindSelector, func(r export.Record) error {
+		if e.InjectErr != nil {
+			if err := e.InjectErr(r); err != nil {
+				return err
 			}
-			return e.output.AddRecordWithResource(r, res)
-		})
+		}
+		return e.output.AddRecord(r)
 	})
 }
 
-// Values returns the mapping from attribute set to point values for the
-// accumulations that were processed. Point values are chosen as either the
-// Sum or the LastValue, whichever is implemented. (All the built-in
-// Aggregators implement one of these interfaces.)
+// Values returns the mapping from label set to point values for the
+// accumulations that were processed.  Point values are chosen as
+// either the Sum or the LastValue, whichever is implemented.  (All
+// the built-in Aggregators implement one of these interfaces.)
 func (e *Exporter) Values() map[string]float64 {
 	e.output.Lock()
 	defer e.output.Unlock()
@@ -377,56 +364,4 @@ func (e *Exporter) Reset() {
 	defer e.output.Unlock()
 	e.output.Reset()
 	e.exportCount = 0
-}
-
-// OneInstrumentationLibraryReader returns an InstrumentationLibraryReader for
-// a single instrumentation library.
-func OneInstrumentationLibraryReader(l instrumentation.Library, r export.Reader) export.InstrumentationLibraryReader {
-	return oneLibraryReader{l, r}
-}
-
-type oneLibraryReader struct {
-	library instrumentation.Library
-	reader  export.Reader
-}
-
-func (o oneLibraryReader) ForEach(readerFunc func(instrumentation.Library, export.Reader) error) error {
-	return readerFunc(o.library, o.reader)
-}
-
-// MultiInstrumentationLibraryReader returns an InstrumentationLibraryReader
-// for a group of records that came from multiple instrumentation libraries.
-func MultiInstrumentationLibraryReader(records map[instrumentation.Library][]export.Record) export.InstrumentationLibraryReader {
-	return instrumentationLibraryReader{records: records}
-}
-
-type instrumentationLibraryReader struct {
-	records map[instrumentation.Library][]export.Record
-}
-
-var _ export.InstrumentationLibraryReader = instrumentationLibraryReader{}
-
-func (m instrumentationLibraryReader) ForEach(fn func(instrumentation.Library, export.Reader) error) error {
-	for library, records := range m.records {
-		if err := fn(library, &metricReader{records: records}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type metricReader struct {
-	sync.RWMutex
-	records []export.Record
-}
-
-var _ export.Reader = &metricReader{}
-
-func (m *metricReader) ForEach(_ aggregation.TemporalitySelector, fn func(export.Record) error) error {
-	for _, record := range m.records {
-		if err := fn(record); err != nil && err != aggregation.ErrNoData {
-			return err
-		}
-	}
-	return nil
 }

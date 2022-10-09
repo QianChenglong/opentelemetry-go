@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package opencensus // import "go.opentelemetry.io/otel/bridge/opencensus"
+package opencensus
 
 import (
 	"errors"
@@ -21,8 +21,8 @@ import (
 
 	"go.opencensus.io/metric/metricdata"
 
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/number"
+	"go.opentelemetry.io/otel/metric/number"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 )
 
 var (
@@ -31,109 +31,127 @@ var (
 	errBadPoint         = errors.New("point cannot be converted")
 )
 
-type recordFunc func(agg aggregation.Aggregation, end time.Time) error
+// aggregationWithEndTime is an aggregation that can also provide the timestamp
+// of the last recorded point.
+type aggregationWithEndTime interface {
+	aggregation.Aggregation
+	end() time.Time
+}
 
-// recordAggregationsFromPoints records one OpenTelemetry aggregation for
-// each OpenCensus point.  Points may not be empty and must be either
+// newAggregationFromPoints creates an OpenTelemetry aggregation from
+// OpenCensus points.  Points may not be empty and must be either
 // all (int|float)64 or all *metricdata.Distribution.
-func recordAggregationsFromPoints(points []metricdata.Point, recorder recordFunc) error {
+func newAggregationFromPoints(points []metricdata.Point) (aggregationWithEndTime, error) {
 	if len(points) == 0 {
-		return errEmpty
+		return nil, errEmpty
 	}
 	switch t := points[0].Value.(type) {
 	case int64:
-		return recordGaugePoints(points, recorder)
+		return newExactAggregator(points)
 	case float64:
-		return recordGaugePoints(points, recorder)
+		return newExactAggregator(points)
 	case *metricdata.Distribution:
-		return recordDistributionPoint(points, recorder)
+		return newDistributionAggregator(points)
 	default:
 		// TODO add *metricdata.Summary support
-		return fmt.Errorf("%w: %v", errIncompatibleType, t)
+		return nil, fmt.Errorf("%w: %v", errIncompatibleType, t)
 	}
 }
 
-var _ aggregation.Aggregation = &ocRawAggregator{}
-var _ aggregation.LastValue = &ocRawAggregator{}
+var _ aggregation.Aggregation = &ocExactAggregator{}
+var _ aggregation.LastValue = &ocExactAggregator{}
+var _ aggregation.Points = &ocExactAggregator{}
 
-// recordGaugePoints creates an OpenTelemetry aggregation from OpenCensus points.
+// newExactAggregator creates an OpenTelemetry aggreation from OpenCensus points.
 // Points may not be empty, and must only contain integers or floats.
-func recordGaugePoints(pts []metricdata.Point, recorder recordFunc) error {
-	for _, pt := range pts {
+func newExactAggregator(pts []metricdata.Point) (aggregationWithEndTime, error) {
+	points := make([]aggregation.Point, len(pts))
+	for i, pt := range pts {
 		switch t := pt.Value.(type) {
 		case int64:
-			if err := recorder(&ocRawAggregator{
-				value: number.NewInt64Number(pt.Value.(int64)),
-				time:  pt.Time,
-			}, pt.Time); err != nil {
-				return err
+			points[i] = aggregation.Point{
+				Number: number.NewInt64Number(pt.Value.(int64)),
+				Time:   pt.Time,
 			}
 		case float64:
-			if err := recorder(&ocRawAggregator{
-				value: number.NewFloat64Number(pt.Value.(float64)),
-				time:  pt.Time,
-			}, pt.Time); err != nil {
-				return err
+			points[i] = aggregation.Point{
+				Number: number.NewFloat64Number(pt.Value.(float64)),
+				Time:   pt.Time,
 			}
 		default:
-			return fmt.Errorf("%w: %v", errIncompatibleType, t)
+			return nil, fmt.Errorf("%w: %v", errIncompatibleType, t)
 		}
 	}
-	return nil
+	return &ocExactAggregator{
+		points: points,
+	}, nil
 }
 
-type ocRawAggregator struct {
-	value number.Number
-	time  time.Time
+type ocExactAggregator struct {
+	points []aggregation.Point
 }
 
 // Kind returns the kind of aggregation this is.
-func (o *ocRawAggregator) Kind() aggregation.Kind {
-	return aggregation.LastValueKind
+func (o *ocExactAggregator) Kind() aggregation.Kind {
+	return aggregation.ExactKind
+}
+
+// Points returns access to the raw data set.
+func (o *ocExactAggregator) Points() ([]aggregation.Point, error) {
+	return o.points, nil
 }
 
 // LastValue returns the last point.
-func (o *ocRawAggregator) LastValue() (number.Number, time.Time, error) {
-	return o.value, o.time, nil
+func (o *ocExactAggregator) LastValue() (number.Number, time.Time, error) {
+	last := o.points[len(o.points)-1]
+	return last.Number, last.Time, nil
+}
+
+// end returns the timestamp of the last point
+func (o *ocExactAggregator) end() time.Time {
+	_, t, _ := o.LastValue()
+	return t
 }
 
 var _ aggregation.Aggregation = &ocDistAggregator{}
 var _ aggregation.Histogram = &ocDistAggregator{}
 
-// recordDistributionPoint creates an OpenTelemetry aggregation from
+// newDistributionAggregator creates an OpenTelemetry aggreation from
 // OpenCensus points. Points may not be empty, and must only contain
 // Distributions.  The most recent disribution will be used in the aggregation.
-func recordDistributionPoint(pts []metricdata.Point, recorder recordFunc) error {
+func newDistributionAggregator(pts []metricdata.Point) (aggregationWithEndTime, error) {
 	// only use the most recent datapoint for now.
 	pt := pts[len(pts)-1]
 	val, ok := pt.Value.(*metricdata.Distribution)
 	if !ok {
-		return fmt.Errorf("%w: %v", errBadPoint, pt.Value)
+		return nil, fmt.Errorf("%w: %v", errBadPoint, pt.Value)
 	}
 	bucketCounts := make([]uint64, len(val.Buckets))
 	for i, bucket := range val.Buckets {
 		if bucket.Count < 0 {
-			return fmt.Errorf("%w: bucket count may not be negative", errBadPoint)
+			return nil, fmt.Errorf("%w: bucket count may not be negative", errBadPoint)
 		}
 		bucketCounts[i] = uint64(bucket.Count)
 	}
 	if val.Count < 0 {
-		return fmt.Errorf("%w: count may not be negative", errBadPoint)
+		return nil, fmt.Errorf("%w: count may not be negative", errBadPoint)
 	}
-	return recorder(&ocDistAggregator{
+	return &ocDistAggregator{
 		sum:   number.NewFloat64Number(val.Sum),
 		count: uint64(val.Count),
 		buckets: aggregation.Buckets{
 			Boundaries: val.BucketOptions.Bounds,
 			Counts:     bucketCounts,
 		},
-	}, pts[len(pts)-1].Time)
+		endTime: pts[len(pts)-1].Time,
+	}, nil
 }
 
 type ocDistAggregator struct {
 	sum     number.Number
 	count   uint64
 	buckets aggregation.Buckets
+	endTime time.Time
 }
 
 // Kind returns the kind of aggregation this is.
@@ -154,4 +172,9 @@ func (o *ocDistAggregator) Count() (uint64, error) {
 // Histogram returns the count of events in pre-determined buckets.
 func (o *ocDistAggregator) Histogram() (aggregation.Buckets, error) {
 	return o.buckets, nil
+}
+
+// end returns the time the histogram was measured.
+func (o *ocDistAggregator) end() time.Time {
+	return o.endTime
 }

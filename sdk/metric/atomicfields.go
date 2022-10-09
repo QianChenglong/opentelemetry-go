@@ -16,7 +16,6 @@ package metric // import "go.opentelemetry.io/otel/sdk/metric"
 
 import "unsafe"
 
-// Deprecated: will be removed soon.
 func AtomicFieldOffsets() map[string]uintptr {
 	return map[string]uintptr{
 		"record.refMapped.value": unsafe.Offsetof(record{}.refMapped.value),

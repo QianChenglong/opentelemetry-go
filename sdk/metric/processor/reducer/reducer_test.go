@@ -21,14 +21,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric/instrument"
-	"go.opentelemetry.io/otel/sdk/instrumentation"
+	"go.opentelemetry.io/otel/metric"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/processor/basic"
-	"go.opentelemetry.io/otel/sdk/metric/processor/processortest"
+	processorTest "go.opentelemetry.io/otel/sdk/metric/processor/processortest"
 	"go.opentelemetry.io/otel/sdk/metric/processor/reducer"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
@@ -47,57 +45,58 @@ var (
 
 type testFilter struct{}
 
-func (testFilter) AttributeFilterFor(_ *sdkapi.Descriptor) attribute.Filter {
-	return func(attr attribute.KeyValue) bool {
-		return attr.Key == "A" || attr.Key == "C"
+func (testFilter) LabelFilterFor(_ *metric.Descriptor) attribute.Filter {
+	return func(label attribute.KeyValue) bool {
+		return label.Key == "A" || label.Key == "C"
 	}
 }
 
-func generateData(t *testing.T, impl sdkapi.MeterImpl) {
+func generateData(impl metric.MeterImpl) {
 	ctx := context.Background()
-	meter := sdkapi.WrapMeterImpl(impl)
+	meter := metric.WrapMeterImpl(impl, "testing")
 
-	counter, err := meter.SyncFloat64().Counter("counter.sum")
-	require.NoError(t, err)
+	counter := metric.Must(meter).NewFloat64Counter("counter.sum")
+
+	_ = metric.Must(meter).NewInt64SumObserver("observer.sum",
+		func(_ context.Context, result metric.Int64ObserverResult) {
+			result.Observe(10, kvs1...)
+			result.Observe(10, kvs2...)
+		},
+	)
+
 	counter.Add(ctx, 100, kvs1...)
 	counter.Add(ctx, 100, kvs2...)
-
-	counterObserver, err := meter.AsyncInt64().Counter("observer.sum")
-	require.NoError(t, err)
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		counterObserver.Observe(ctx, 10, kvs1...)
-		counterObserver.Observe(ctx, 10, kvs2...)
-	})
-	require.NoError(t, err)
 }
 
 func TestFilterProcessor(t *testing.T) {
-	testProc := processortest.NewProcessor(
-		processortest.AggregatorSelector(),
+	testProc := processorTest.NewProcessor(
+		processorTest.AggregatorSelector(),
 		attribute.DefaultEncoder(),
 	)
 	accum := metricsdk.NewAccumulator(
-		reducer.New(testFilter{}, processortest.NewCheckpointer(testProc)),
+		reducer.New(testFilter{}, processorTest.Checkpointer(testProc)),
+		resource.NewWithAttributes(attribute.String("R", "V")),
 	)
-	generateData(t, accum)
+	generateData(accum)
 
 	accum.Collect(context.Background())
 
 	require.EqualValues(t, map[string]float64{
-		"counter.sum/A=1,C=3/":  200,
-		"observer.sum/A=1,C=3/": 20,
+		"counter.sum/A=1,C=3/R=V":  200,
+		"observer.sum/A=1,C=3/R=V": 20,
 	}, testProc.Values())
 }
 
 // Test a filter with the ../basic Processor.
 func TestFilterBasicProcessor(t *testing.T) {
-	basicProc := basic.New(processortest.AggregatorSelector(), aggregation.CumulativeTemporalitySelector())
+	basicProc := basic.New(processorTest.AggregatorSelector(), export.CumulativeExportKindSelector())
 	accum := metricsdk.NewAccumulator(
 		reducer.New(testFilter{}, basicProc),
+		resource.NewWithAttributes(attribute.String("R", "V")),
 	)
-	exporter := processortest.New(basicProc, attribute.DefaultEncoder())
+	exporter := processorTest.NewExporter(basicProc, attribute.DefaultEncoder())
 
-	generateData(t, accum)
+	generateData(accum)
 
 	basicProc.StartCollection()
 	accum.Collect(context.Background())
@@ -105,10 +104,7 @@ func TestFilterBasicProcessor(t *testing.T) {
 		t.Error(err)
 	}
 
-	res := resource.NewSchemaless(attribute.String("R", "V"))
-	require.NoError(t, exporter.Export(context.Background(), res, processortest.OneInstrumentationLibraryReader(instrumentation.Library{
-		Name: "test",
-	}, basicProc.Reader())))
+	require.NoError(t, exporter.Export(context.Background(), basicProc.CheckpointSet()))
 
 	require.EqualValues(t, map[string]float64{
 		"counter.sum/A=1,C=3/R=V":  200,

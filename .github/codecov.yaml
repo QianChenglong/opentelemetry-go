@@ -2,8 +2,9 @@ codecov:
   require_ci_to_pass: yes
 
 ignore:
-  - "exporters/jaeger/internal/gen-go/**/*"
-  - "exporters/jaeger/internal/third_party/**/*"
+  - "exporters/otlp/internal/opentelemetry-proto-gen/**/*"
+  - "exporters/trace/jaeger/internal/gen-go/**/*"
+  - "exporters/trace/jaeger/internal/third_party/**/*"
 
 coverage:
   precision: 1

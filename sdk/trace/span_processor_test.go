@@ -31,9 +31,6 @@ type testSpanProcessor struct {
 }
 
 func (t *testSpanProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) {
-	if t == nil {
-		return
-	}
 	psc := trace.SpanContextFromContext(parent)
 	kv := []attribute.KeyValue{
 		{
@@ -58,24 +55,15 @@ func (t *testSpanProcessor) OnStart(parent context.Context, s sdktrace.ReadWrite
 }
 
 func (t *testSpanProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
-	if t == nil {
-		return
-	}
 	t.spansEnded = append(t.spansEnded, s)
 }
 
 func (t *testSpanProcessor) Shutdown(_ context.Context) error {
-	if t == nil {
-		return nil
-	}
 	t.shutdownCount++
 	return nil
 }
 
 func (t *testSpanProcessor) ForceFlush(context.Context) error {
-	if t == nil {
-		return nil
-	}
 	return nil
 }
 
@@ -217,6 +205,9 @@ func TestSpanProcessorShutdown(t *testing.T) {
 	name := "Increment shutdown counter of a span processor"
 	tp := basicTracerProvider(t)
 	sp := NewTestSpanProcessor("sp")
+	if sp == nil {
+		t.Fatalf("Error creating new instance of TestSpanProcessor\n")
+	}
 	tp.RegisterSpanProcessor(sp)
 
 	wantCount := 1
@@ -235,6 +226,9 @@ func TestMultipleUnregisterSpanProcessorCalls(t *testing.T) {
 	name := "Increment shutdown counter after first UnregisterSpanProcessor call"
 	tp := basicTracerProvider(t)
 	sp := NewTestSpanProcessor("sp")
+	if sp == nil {
+		t.Fatalf("Error creating new instance of TestSpanProcessor\n")
+	}
 
 	wantCount := 1
 

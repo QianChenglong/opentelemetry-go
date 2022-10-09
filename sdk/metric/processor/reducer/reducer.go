@@ -16,31 +16,31 @@ package reducer // import "go.opentelemetry.io/otel/sdk/metric/processor/reducer
 
 import (
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
+	"go.opentelemetry.io/otel/metric"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
 )
 
 type (
 	// Processor implements "dimensionality reduction" by
-	// filtering keys from export attribute sets.
+	// filtering keys from export label sets.
 	Processor struct {
 		export.Checkpointer
-		filterSelector AttributeFilterSelector
+		filterSelector LabelFilterSelector
 	}
 
-	// AttributeFilterSelector selects an attribute filter based on the
-	// instrument described by the descriptor.
-	AttributeFilterSelector interface {
-		AttributeFilterFor(descriptor *sdkapi.Descriptor) attribute.Filter
+	// LabelFilterSelector is the interface used to configure a
+	// specific Filter to an instrument.
+	LabelFilterSelector interface {
+		LabelFilterFor(descriptor *metric.Descriptor) attribute.Filter
 	}
 )
 
 var _ export.Processor = &Processor{}
 var _ export.Checkpointer = &Processor{}
 
-// New returns a dimensionality-reducing Processor that passes data to the
-// next stage in an export pipeline.
-func New(filterSelector AttributeFilterSelector, ckpter export.Checkpointer) *Processor {
+// New returns a dimensionality-reducing Processor that passes data to
+// the next stage in an export pipeline.
+func New(filterSelector LabelFilterSelector, ckpter export.Checkpointer) *Processor {
 	return &Processor{
 		Checkpointer:   ckpter,
 		filterSelector: filterSelector,
@@ -49,10 +49,10 @@ func New(filterSelector AttributeFilterSelector, ckpter export.Checkpointer) *Pr
 
 // Process implements export.Processor.
 func (p *Processor) Process(accum export.Accumulation) error {
-	// Note: the removed attributes are returned and ignored here.
+	// Note: the removed labels are returned and ignored here.
 	// Conceivably these inputs could be useful to a sampler.
-	reduced, _ := accum.Attributes().Filter(
-		p.filterSelector.AttributeFilterFor(
+	reduced, _ := accum.Labels().Filter(
+		p.filterSelector.LabelFilterFor(
 			accum.Descriptor(),
 		),
 	)
@@ -60,6 +60,7 @@ func (p *Processor) Process(accum export.Accumulation) error {
 		export.NewAccumulation(
 			accum.Descriptor(),
 			&reduced,
+			accum.Resource(),
 			accum.Aggregator(),
 		),
 	)

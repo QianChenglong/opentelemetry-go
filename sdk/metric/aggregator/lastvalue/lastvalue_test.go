@@ -25,16 +25,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	ottest "go.opentelemetry.io/otel/internal/internaltest"
-	"go.opentelemetry.io/otel/sdk/metric/aggregator"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator/aggregatortest"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/number"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 )
 
 const count = 100
 
-var _ aggregator.Aggregator = &Aggregator{}
+var _ export.Aggregator = &Aggregator{}
 
 // Ensure struct alignment prior to running tests.
 func TestMain(m *testing.M) {
@@ -72,11 +72,11 @@ func TestLastValueUpdate(t *testing.T) {
 	aggregatortest.RunProfiles(t, func(t *testing.T, profile aggregatortest.Profile) {
 		agg, ckpt := new2()
 
-		record := aggregatortest.NewAggregatorTest(sdkapi.GaugeObserverInstrumentKind, profile.NumberKind)
+		record := aggregatortest.NewAggregatorTest(metric.ValueObserverInstrumentKind, profile.NumberKind)
 
 		var last number.Number
 		for i := 0; i < count; i++ {
-			x := profile.Random(rand.Intn(2)*2 - 1)
+			x := profile.Random(rand.Intn(1)*2 - 1)
 			last = x
 			aggregatortest.CheckedUpdate(t, agg, x, record)
 		}
@@ -94,7 +94,7 @@ func TestLastValueMerge(t *testing.T) {
 	aggregatortest.RunProfiles(t, func(t *testing.T, profile aggregatortest.Profile) {
 		agg1, agg2, ckpt1, ckpt2 := new4()
 
-		descriptor := aggregatortest.NewAggregatorTest(sdkapi.GaugeObserverInstrumentKind, profile.NumberKind)
+		descriptor := aggregatortest.NewAggregatorTest(metric.ValueObserverInstrumentKind, profile.NumberKind)
 
 		first1 := profile.Random(+1)
 		first2 := profile.Random(+1)
@@ -127,7 +127,7 @@ func TestLastValueMerge(t *testing.T) {
 }
 
 func TestLastValueNotSet(t *testing.T) {
-	descriptor := aggregatortest.NewAggregatorTest(sdkapi.GaugeObserverInstrumentKind, number.Int64Kind)
+	descriptor := aggregatortest.NewAggregatorTest(metric.ValueObserverInstrumentKind, number.Int64Kind)
 
 	g, ckpt := new2()
 	require.NoError(t, g.SynchronizedMove(ckpt, descriptor))
@@ -138,8 +138,8 @@ func TestLastValueNotSet(t *testing.T) {
 func TestSynchronizedMoveReset(t *testing.T) {
 	aggregatortest.SynchronizedMoveResetTest(
 		t,
-		sdkapi.GaugeObserverInstrumentKind,
-		func(desc *sdkapi.Descriptor) aggregator.Aggregator {
+		metric.ValueObserverInstrumentKind,
+		func(desc *metric.Descriptor) export.Aggregator {
 			return &New(1)[0]
 		},
 	)

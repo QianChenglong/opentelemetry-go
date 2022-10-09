@@ -16,52 +16,44 @@ package time // import "go.opentelemetry.io/otel/sdk/metric/controller/time"
 
 import (
 	"time"
+	lib "time"
 )
 
 // Several types below are created to match "github.com/benbjohnson/clock"
 // so that it remains a test-only dependency.
 
-// Clock keeps track of time for a metric SDK.
 type Clock interface {
-	Now() time.Time
-	Ticker(duration time.Duration) Ticker
+	Now() lib.Time
+	Ticker(duration lib.Duration) Ticker
 }
 
-// Ticker signals time intervals.
 type Ticker interface {
 	Stop()
-	C() <-chan time.Time
+	C() <-chan lib.Time
 }
 
-// RealClock wraps the time package and uses the system time to tell time.
 type RealClock struct {
 }
 
-// RealTicker wraps the time package and uses system time to tick time
-// intervals.
 type RealTicker struct {
-	ticker *time.Ticker
+	ticker *lib.Ticker
 }
 
 var _ Clock = RealClock{}
 var _ Ticker = RealTicker{}
 
-// Now returns the current time.
 func (RealClock) Now() time.Time {
 	return time.Now()
 }
 
-// Ticker creates a new RealTicker that will tick with period.
 func (RealClock) Ticker(period time.Duration) Ticker {
 	return RealTicker{time.NewTicker(period)}
 }
 
-// Stop turns off the RealTicker.
 func (t RealTicker) Stop() {
 	t.ticker.Stop()
 }
 
-// C returns a channel that receives the current time when RealTicker ticks.
 func (t RealTicker) C() <-chan time.Time {
 	return t.ticker.C
 }

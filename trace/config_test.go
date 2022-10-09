@@ -41,191 +41,157 @@ func TestNewSpanConfig(t *testing.T) {
 	}
 
 	tests := []struct {
-		options  []SpanStartOption
-		expected SpanConfig
+		options  []SpanOption
+		expected *SpanConfig
 	}{
 		{
 			// No non-zero-values should be set.
-			[]SpanStartOption{},
-			SpanConfig{},
+			[]SpanOption{},
+			new(SpanConfig),
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				WithAttributes(k1v1),
 			},
-			SpanConfig{
-				attributes: []attribute.KeyValue{k1v1},
+			&SpanConfig{
+				Attributes: []attribute.KeyValue{k1v1},
 			},
 		},
 		{
 			// Multiple calls should append not overwrite.
-			[]SpanStartOption{
+			[]SpanOption{
 				WithAttributes(k1v1),
 				WithAttributes(k1v2),
 				WithAttributes(k2v2),
 			},
-			SpanConfig{
+			&SpanConfig{
 				// No uniqueness is guaranteed by the API.
-				attributes: []attribute.KeyValue{k1v1, k1v2, k2v2},
+				Attributes: []attribute.KeyValue{k1v1, k1v2, k2v2},
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				WithAttributes(k1v1, k1v2, k2v2),
 			},
-			SpanConfig{
+			&SpanConfig{
 				// No uniqueness is guaranteed by the API.
-				attributes: []attribute.KeyValue{k1v1, k1v2, k2v2},
+				Attributes: []attribute.KeyValue{k1v1, k1v2, k2v2},
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				WithTimestamp(timestamp0),
 			},
-			SpanConfig{
-				timestamp: timestamp0,
+			&SpanConfig{
+				Timestamp: timestamp0,
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				// Multiple calls overwrites with last-one-wins.
 				WithTimestamp(timestamp0),
 				WithTimestamp(timestamp1),
 			},
-			SpanConfig{
-				timestamp: timestamp1,
+			&SpanConfig{
+				Timestamp: timestamp1,
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				WithLinks(link1),
 			},
-			SpanConfig{
-				links: []Link{link1},
+			&SpanConfig{
+				Links: []Link{link1},
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				// Multiple calls should append not overwrite.
 				WithLinks(link1),
 				WithLinks(link1, link2),
 			},
-			SpanConfig{
+			&SpanConfig{
 				// No uniqueness is guaranteed by the API.
-				links: []Link{link1, link1, link2},
+				Links: []Link{link1, link1, link2},
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				WithNewRoot(),
 			},
-			SpanConfig{
-				newRoot: true,
+			&SpanConfig{
+				NewRoot: true,
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				// Multiple calls should not change NewRoot state.
 				WithNewRoot(),
 				WithNewRoot(),
 			},
-			SpanConfig{
-				newRoot: true,
+			&SpanConfig{
+				NewRoot: true,
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				WithSpanKind(SpanKindConsumer),
 			},
-			SpanConfig{
-				spanKind: SpanKindConsumer,
+			&SpanConfig{
+				SpanKind: SpanKindConsumer,
 			},
 		},
 		{
-			[]SpanStartOption{
+			[]SpanOption{
 				// Multiple calls overwrites with last-one-wins.
 				WithSpanKind(SpanKindClient),
 				WithSpanKind(SpanKindConsumer),
 			},
-			SpanConfig{
-				spanKind: SpanKindConsumer,
+			&SpanConfig{
+				SpanKind: SpanKindConsumer,
 			},
 		},
 		{
 			// Everything should work together.
-			[]SpanStartOption{
+			[]SpanOption{
 				WithAttributes(k1v1),
 				WithTimestamp(timestamp0),
 				WithLinks(link1, link2),
 				WithNewRoot(),
 				WithSpanKind(SpanKindConsumer),
 			},
-			SpanConfig{
-				attributes: []attribute.KeyValue{k1v1},
-				timestamp:  timestamp0,
-				links:      []Link{link1, link2},
-				newRoot:    true,
-				spanKind:   SpanKindConsumer,
+			&SpanConfig{
+				Attributes: []attribute.KeyValue{k1v1},
+				Timestamp:  timestamp0,
+				Links:      []Link{link1, link2},
+				NewRoot:    true,
+				SpanKind:   SpanKindConsumer,
 			},
 		},
 	}
 	for _, test := range tests {
-		assert.Equal(t, test.expected, NewSpanStartConfig(test.options...))
-	}
-}
-
-func TestEndSpanConfig(t *testing.T) {
-	timestamp := time.Unix(0, 0)
-
-	tests := []struct {
-		options  []SpanEndOption
-		expected SpanConfig
-	}{
-		{
-			[]SpanEndOption{},
-			SpanConfig{},
-		},
-		{
-			[]SpanEndOption{
-				WithStackTrace(true),
-			},
-			SpanConfig{
-				stackTrace: true,
-			},
-		},
-		{
-			[]SpanEndOption{
-				WithTimestamp(timestamp),
-			},
-			SpanConfig{
-				timestamp: timestamp,
-			},
-		},
-	}
-	for _, test := range tests {
-		assert.Equal(t, test.expected, NewSpanEndConfig(test.options...))
+		assert.Equal(t, test.expected, NewSpanConfig(test.options...))
 	}
 }
 
 func TestTracerConfig(t *testing.T) {
 	v1 := "semver:0.0.1"
 	v2 := "semver:1.0.0"
-	schemaURL := "https://opentelemetry.io/schemas/1.2.0"
 	tests := []struct {
 		options  []TracerOption
-		expected TracerConfig
+		expected *TracerConfig
 	}{
 		{
 			// No non-zero-values should be set.
 			[]TracerOption{},
-			TracerConfig{},
+			new(TracerConfig),
 		},
 		{
 			[]TracerOption{
 				WithInstrumentationVersion(v1),
 			},
-			TracerConfig{
-				instrumentationVersion: v1,
+			&TracerConfig{
+				InstrumentationVersion: v1,
 			},
 		},
 		{
@@ -234,89 +200,13 @@ func TestTracerConfig(t *testing.T) {
 				WithInstrumentationVersion(v1),
 				WithInstrumentationVersion(v2),
 			},
-			TracerConfig{
-				instrumentationVersion: v2,
-			},
-		},
-		{
-			[]TracerOption{
-				WithSchemaURL(schemaURL),
-			},
-			TracerConfig{
-				schemaURL: schemaURL,
+			&TracerConfig{
+				InstrumentationVersion: v2,
 			},
 		},
 	}
 	for _, test := range tests {
 		config := NewTracerConfig(test.options...)
 		assert.Equal(t, test.expected, config)
-	}
-}
-
-// Save benchmark results to a file level var to avoid the compiler optimizing
-// away the actual work.
-var (
-	tracerConfig TracerConfig
-	spanConfig   SpanConfig
-	eventConfig  EventConfig
-)
-
-func BenchmarkNewTracerConfig(b *testing.B) {
-	opts := []TracerOption{
-		WithInstrumentationVersion("testing verion"),
-		WithSchemaURL("testing URL"),
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		tracerConfig = NewTracerConfig(opts...)
-	}
-}
-
-func BenchmarkNewSpanStartConfig(b *testing.B) {
-	opts := []SpanStartOption{
-		WithAttributes(attribute.Bool("key", true)),
-		WithTimestamp(time.Now()),
-		WithLinks(Link{}),
-		WithNewRoot(),
-		WithSpanKind(SpanKindClient),
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		spanConfig = NewSpanStartConfig(opts...)
-	}
-}
-
-func BenchmarkNewSpanEndConfig(b *testing.B) {
-	opts := []SpanEndOption{
-		WithTimestamp(time.Now()),
-		WithStackTrace(true),
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		spanConfig = NewSpanEndConfig(opts...)
-	}
-}
-
-func BenchmarkNewEventConfig(b *testing.B) {
-	opts := []EventOption{
-		WithAttributes(attribute.Bool("key", true)),
-		WithTimestamp(time.Now()),
-		WithStackTrace(true),
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		eventConfig = NewEventConfig(opts...)
 	}
 }

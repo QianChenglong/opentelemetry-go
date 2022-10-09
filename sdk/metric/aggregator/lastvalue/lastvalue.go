@@ -20,10 +20,11 @@ import (
 	"time"
 	"unsafe"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/number"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	"go.opentelemetry.io/otel/sdk/metric/aggregator"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
-	"go.opentelemetry.io/otel/sdk/metric/number"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 )
 
 type (
@@ -42,14 +43,15 @@ type (
 		// value needs to be aligned for 64-bit atomic operations.
 		value number.Number
 
-		// timestamp indicates when this record was submitted. This can be
-		// used to pick a winner when multiple records contain lastValue data
-		// for the same attributes due to races.
+		// timestamp indicates when this record was submitted.
+		// this can be used to pick a winner when multiple
+		// records contain lastValue data for the same labels due
+		// to races.
 		timestamp time.Time
 	}
 )
 
-var _ aggregator.Aggregator = &Aggregator{}
+var _ export.Aggregator = &Aggregator{}
 var _ aggregation.LastValue = &Aggregator{}
 
 // An unset lastValue has zero timestamp and zero value.
@@ -90,7 +92,7 @@ func (g *Aggregator) LastValue() (number.Number, time.Time, error) {
 }
 
 // SynchronizedMove atomically saves the current value.
-func (g *Aggregator) SynchronizedMove(oa aggregator.Aggregator, _ *sdkapi.Descriptor) error {
+func (g *Aggregator) SynchronizedMove(oa export.Aggregator, _ *metric.Descriptor) error {
 	if oa == nil {
 		atomic.StorePointer(&g.value, unsafe.Pointer(unsetLastValue))
 		return nil
@@ -104,9 +106,9 @@ func (g *Aggregator) SynchronizedMove(oa aggregator.Aggregator, _ *sdkapi.Descri
 }
 
 // Update atomically sets the current "last" value.
-func (g *Aggregator) Update(_ context.Context, n number.Number, desc *sdkapi.Descriptor) error {
+func (g *Aggregator) Update(_ context.Context, number number.Number, desc *metric.Descriptor) error {
 	ngd := &lastValueData{
-		value:     n,
+		value:     number,
 		timestamp: time.Now(),
 	}
 	atomic.StorePointer(&g.value, unsafe.Pointer(ngd))
@@ -115,7 +117,7 @@ func (g *Aggregator) Update(_ context.Context, n number.Number, desc *sdkapi.Des
 
 // Merge combines state from two aggregators.  The most-recently set
 // value is chosen.
-func (g *Aggregator) Merge(oa aggregator.Aggregator, desc *sdkapi.Descriptor) error {
+func (g *Aggregator) Merge(oa export.Aggregator, desc *metric.Descriptor) error {
 	o, _ := oa.(*Aggregator)
 	if o == nil {
 		return aggregator.NewInconsistentAggregatorError(g, oa)

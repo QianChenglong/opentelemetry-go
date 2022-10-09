@@ -17,13 +17,12 @@ package basic // import "go.opentelemetry.io/otel/sdk/metric/controller/basic"
 import (
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/sdk/metric/export"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-// config contains configuration for a basic Controller.
-type config struct {
+// Config contains configuration for a basic Controller.
+type Config struct {
 	// Resource is the OpenTelemetry resource associated with all Meters
 	// created by the Controller.
 	Resource *resource.Resource
@@ -61,25 +60,21 @@ type config struct {
 
 // Option is the interface that applies the value to a configuration option.
 type Option interface {
-	// apply sets the Option value of a Config.
-	apply(config) config
+	// Apply sets the Option value of a Config.
+	Apply(*Config)
 }
 
 // WithResource sets the Resource configuration option of a Config by merging it
 // with the Resource configuration in the environment.
 func WithResource(r *resource.Resource) Option {
-	return resourceOption{r}
+	res := resource.Merge(resource.Environment(), r)
+	return resourceOption{res}
 }
 
 type resourceOption struct{ *resource.Resource }
 
-func (o resourceOption) apply(cfg config) config {
-	res, err := resource.Merge(cfg.Resource, o.Resource)
-	if err != nil {
-		otel.Handle(err)
-	}
-	cfg.Resource = res
-	return cfg
+func (o resourceOption) Apply(config *Config) {
+	config.Resource = o.Resource
 }
 
 // WithCollectPeriod sets the CollectPeriod configuration option of a Config.
@@ -89,9 +84,8 @@ func WithCollectPeriod(period time.Duration) Option {
 
 type collectPeriodOption time.Duration
 
-func (o collectPeriodOption) apply(cfg config) config {
-	cfg.CollectPeriod = time.Duration(o)
-	return cfg
+func (o collectPeriodOption) Apply(config *Config) {
+	config.CollectPeriod = time.Duration(o)
 }
 
 // WithCollectTimeout sets the CollectTimeout configuration option of a Config.
@@ -101,9 +95,8 @@ func WithCollectTimeout(timeout time.Duration) Option {
 
 type collectTimeoutOption time.Duration
 
-func (o collectTimeoutOption) apply(cfg config) config {
-	cfg.CollectTimeout = time.Duration(o)
-	return cfg
+func (o collectTimeoutOption) Apply(config *Config) {
+	config.CollectTimeout = time.Duration(o)
 }
 
 // WithExporter sets the exporter configuration option of a Config.
@@ -113,9 +106,8 @@ func WithExporter(exporter export.Exporter) Option {
 
 type exporterOption struct{ exporter export.Exporter }
 
-func (o exporterOption) apply(cfg config) config {
-	cfg.Exporter = o.exporter
-	return cfg
+func (o exporterOption) Apply(config *Config) {
+	config.Exporter = o.exporter
 }
 
 // WithPushTimeout sets the PushTimeout configuration option of a Config.
@@ -125,7 +117,6 @@ func WithPushTimeout(timeout time.Duration) Option {
 
 type pushTimeoutOption time.Duration
 
-func (o pushTimeoutOption) apply(cfg config) config {
-	cfg.PushTimeout = time.Duration(o)
-	return cfg
+func (o pushTimeoutOption) Apply(config *Config) {
+	config.PushTimeout = time.Duration(o)
 }

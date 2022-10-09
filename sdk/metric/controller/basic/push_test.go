@@ -27,16 +27,17 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	controller "go.opentelemetry.io/otel/sdk/metric/controller/basic"
 	"go.opentelemetry.io/otel/sdk/metric/controller/controllertest"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
 	processor "go.opentelemetry.io/otel/sdk/metric/processor/basic"
 	"go.opentelemetry.io/otel/sdk/metric/processor/processortest"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-var testResource = resource.NewSchemaless(attribute.String("R", "V"))
+var testResource = resource.NewWithAttributes(attribute.String("R", "V"))
 
 type handler struct {
 	sync.Mutex
@@ -65,23 +66,25 @@ func init() {
 }
 
 func newExporter() *processortest.Exporter {
-	return processortest.New(
-		aggregation.StatelessTemporalitySelector(),
+	return processortest.NewExporter(
+		export.StatelessExportKindSelector(),
 		attribute.DefaultEncoder(),
 	)
 }
 
-func newCheckpointerFactory() export.CheckpointerFactory {
-	return processortest.NewCheckpointerFactory(
-		processortest.AggregatorSelector(),
-		attribute.DefaultEncoder(),
+func newCheckpointer() export.Checkpointer {
+	return processortest.Checkpointer(
+		processortest.NewProcessor(
+			processortest.AggregatorSelector(),
+			attribute.DefaultEncoder(),
+		),
 	)
 }
 
 func TestPushDoubleStop(t *testing.T) {
 	ctx := context.Background()
 	exporter := newExporter()
-	checkpointer := newCheckpointerFactory()
+	checkpointer := newCheckpointer()
 	p := controller.New(checkpointer, controller.WithExporter(exporter))
 	require.NoError(t, p.Start(ctx))
 	require.NoError(t, p.Stop(ctx))
@@ -91,7 +94,7 @@ func TestPushDoubleStop(t *testing.T) {
 func TestPushDoubleStart(t *testing.T) {
 	ctx := context.Background()
 	exporter := newExporter()
-	checkpointer := newCheckpointerFactory()
+	checkpointer := newCheckpointer()
 	p := controller.New(checkpointer, controller.WithExporter(exporter))
 	require.NoError(t, p.Start(ctx))
 	err := p.Start(ctx)
@@ -102,22 +105,21 @@ func TestPushDoubleStart(t *testing.T) {
 
 func TestPushTicker(t *testing.T) {
 	exporter := newExporter()
-	checkpointer := newCheckpointerFactory()
+	checkpointer := newCheckpointer()
 	p := controller.New(
 		checkpointer,
 		controller.WithExporter(exporter),
 		controller.WithCollectPeriod(time.Second),
 		controller.WithResource(testResource),
 	)
-	meter := p.Meter("name")
+	meter := p.MeterProvider().Meter("name")
 
 	mock := controllertest.NewMockClock()
 	p.SetClock(mock)
 
 	ctx := context.Background()
 
-	counter, err := meter.SyncInt64().Counter("counter.sum")
-	require.NoError(t, err)
+	counter := metric.Must(meter).NewInt64Counter("counter.sum")
 
 	require.NoError(t, p.Start(ctx))
 
@@ -183,7 +185,7 @@ func TestPushExportError(t *testing.T) {
 			// This test validates the error handling
 			// behavior of the basic Processor is honored
 			// by the push processor.
-			checkpointer := processor.NewFactory(processortest.AggregatorSelector(), exporter)
+			checkpointer := processor.New(processortest.AggregatorSelector(), exporter)
 			p := controller.New(
 				checkpointer,
 				controller.WithExporter(exporter),
@@ -196,11 +198,9 @@ func TestPushExportError(t *testing.T) {
 
 			ctx := context.Background()
 
-			meter := p.Meter("name")
-			counter1, err := meter.SyncInt64().Counter("counter1.sum")
-			require.NoError(t, err)
-			counter2, err := meter.SyncInt64().Counter("counter2.sum")
-			require.NoError(t, err)
+			meter := p.MeterProvider().Meter("name")
+			counter1 := metric.Must(meter).NewInt64Counter("counter1.sum")
+			counter2 := metric.Must(meter).NewInt64Counter("counter2.sum")
 
 			require.NoError(t, p.Start(ctx))
 			runtime.Gosched()

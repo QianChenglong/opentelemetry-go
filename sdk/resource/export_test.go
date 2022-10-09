@@ -15,16 +15,12 @@
 package resource // import "go.opentelemetry.io/otel/sdk/resource"
 
 var (
-	SetDefaultOSProviders           = setDefaultOSProviders
-	SetOSProviders                  = setOSProviders
-	SetDefaultRuntimeProviders      = setDefaultRuntimeProviders
-	SetRuntimeProviders             = setRuntimeProviders
-	SetDefaultUserProviders         = setDefaultUserProviders
-	SetUserProviders                = setUserProviders
-	SetDefaultOSDescriptionProvider = setDefaultOSDescriptionProvider
-	SetOSDescriptionProvider        = setOSDescriptionProvider
-	SetDefaultContainerProviders    = setDefaultContainerProviders
-	SetContainerProviders           = setContainerProviders
+	SetDefaultOSProviders      = setDefaultOSProviders
+	SetOSProviders             = setOSProviders
+	SetDefaultRuntimeProviders = setDefaultRuntimeProviders
+	SetRuntimeProviders        = setRuntimeProviders
+	SetDefaultUserProviders    = setDefaultUserProviders
+	SetUserProviders           = setUserProviders
 )
 
 var (
@@ -32,8 +28,4 @@ var (
 	RuntimeName = runtimeName
 	RuntimeOS   = runtimeOS
 	RuntimeArch = runtimeArch
-)
-
-var (
-	MapRuntimeOSToSemconvOSType = mapRuntimeOSToSemconvOSType
 )

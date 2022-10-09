@@ -25,15 +25,13 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	ottest "go.opentelemetry.io/otel/internal/internaltest"
-	"go.opentelemetry.io/otel/metric/instrument"
-	"go.opentelemetry.io/otel/sdk/instrumentation"
+	"go.opentelemetry.io/otel/metric"
+	export "go.opentelemetry.io/otel/sdk/export/metric"
+	"go.opentelemetry.io/otel/sdk/export/metric/aggregation"
 	controller "go.opentelemetry.io/otel/sdk/metric/controller/basic"
 	"go.opentelemetry.io/otel/sdk/metric/controller/controllertest"
-	"go.opentelemetry.io/otel/sdk/metric/export"
-	"go.opentelemetry.io/otel/sdk/metric/export/aggregation"
 	processor "go.opentelemetry.io/otel/sdk/metric/processor/basic"
 	"go.opentelemetry.io/otel/sdk/metric/processor/processortest"
-	"go.opentelemetry.io/otel/sdk/metric/sdkapi"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
@@ -43,14 +41,11 @@ func getMap(t *testing.T, cont *controller.Controller) map[string]float64 {
 	out := processortest.NewOutput(attribute.DefaultEncoder())
 
 	require.NoError(t, cont.ForEach(
-		func(_ instrumentation.Scope, reader export.Reader) error {
-			return reader.ForEach(
-				aggregation.CumulativeTemporalitySelector(),
-				func(record export.Record) error {
-					return out.AddRecord(record)
-				},
-			)
-		}))
+		export.CumulativeExportKindSelector(),
+		func(record export.Record) error {
+			return out.AddRecord(record)
+		},
+	))
 	return out.Map()
 }
 
@@ -66,11 +61,9 @@ func checkTestContext(t *testing.T, ctx context.Context) {
 }
 
 func TestControllerUsesResource(t *testing.T) {
-	const envVal = "T=U,key=value"
 	store, err := ottest.SetEnvVariables(map[string]string{
-		envVar: envVal,
+		envVar: "key=value,T=U",
 	})
-
 	require.NoError(t, err)
 	defer func() { require.NoError(t, store.Restore()) }()
 
@@ -82,89 +75,74 @@ func TestControllerUsesResource(t *testing.T) {
 		{
 			name:    "explicitly empty resource",
 			options: []controller.Option{controller.WithResource(resource.Empty())},
-			wanted:  envVal,
-		},
+			wanted:  resource.Environment().Encoded(attribute.DefaultEncoder())},
 		{
 			name:    "uses default if no resource option",
 			options: nil,
-			wanted:  resource.Default().Encoded(attribute.DefaultEncoder()),
-		},
+			wanted:  resource.Default().Encoded(attribute.DefaultEncoder())},
 		{
 			name:    "explicit resource",
-			options: []controller.Option{controller.WithResource(resource.NewSchemaless(attribute.String("R", "S")))},
-			wanted:  "R=S," + envVal,
-		},
+			options: []controller.Option{controller.WithResource(resource.NewWithAttributes(attribute.String("R", "S")))},
+			wanted:  "R=S,T=U,key=value"},
 		{
-			name: "multi resource",
+			name: "last resource wins",
 			options: []controller.Option{
-				controller.WithResource(resource.NewSchemaless(attribute.String("R", "WRONG"))),
-				controller.WithResource(resource.NewSchemaless(attribute.String("R", "S"))),
-				controller.WithResource(resource.NewSchemaless(attribute.String("W", "X"))),
-				controller.WithResource(resource.NewSchemaless(attribute.String("T", "V"))),
+				controller.WithResource(resource.Default()),
+				controller.WithResource(resource.NewWithAttributes(attribute.String("R", "S"))),
 			},
-			wanted: "R=S,T=V,W=X,key=value",
-		},
+			wanted: "R=S,T=U,key=value"},
 		{
-			name: "user override environment",
-			options: []controller.Option{
-				controller.WithResource(resource.NewSchemaless(attribute.String("T", "V"))),
-				controller.WithResource(resource.NewSchemaless(attribute.String("key", "I win"))),
-			},
-			wanted: "T=V,key=I win",
-		},
+			name:    "overlapping attributes with environment resource",
+			options: []controller.Option{controller.WithResource(resource.NewWithAttributes(attribute.String("T", "V")))},
+			wanted:  "T=V,key=value"},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("case-%s", c.name), func(t *testing.T) {
-			sel := aggregation.CumulativeTemporalitySelector()
-			exp := processortest.New(sel, attribute.DefaultEncoder())
 			cont := controller.New(
-				processor.NewFactory(
+				processor.New(
 					processortest.AggregatorSelector(),
-					exp,
+					export.CumulativeExportKindSelector(),
 				),
-				append(c.options, controller.WithExporter(exp))...,
+				c.options...,
 			)
-			ctx := context.Background()
-			require.NoError(t, cont.Start(ctx))
+			prov := cont.MeterProvider()
 
-			ctr, _ := cont.Meter("named").SyncFloat64().Counter("calls.sum")
+			ctr := metric.Must(prov.Meter("named")).NewFloat64Counter("calls.sum")
 			ctr.Add(context.Background(), 1.)
 
 			// Collect once
-			require.NoError(t, cont.Stop(ctx))
+			require.NoError(t, cont.Collect(context.Background()))
 
 			expect := map[string]float64{
 				"calls.sum//" + c.wanted: 1.,
 			}
-			require.EqualValues(t, expect, exp.Values())
+			require.EqualValues(t, expect, getMap(t, cont))
 		})
 	}
 }
 
 func TestStartNoExporter(t *testing.T) {
 	cont := controller.New(
-		processor.NewFactory(
+		processor.New(
 			processortest.AggregatorSelector(),
-			aggregation.CumulativeTemporalitySelector(),
+			export.CumulativeExportKindSelector(),
 		),
 		controller.WithCollectPeriod(time.Second),
 		controller.WithResource(resource.Empty()),
 	)
 	mock := controllertest.NewMockClock()
 	cont.SetClock(mock)
-	meter := cont.Meter("go.opentelemetry.io/otel/sdk/metric/controller/basic_test#StartNoExporter")
 
+	prov := cont.MeterProvider()
 	calls := int64(0)
 
-	counterObserver, err := meter.AsyncInt64().Counter("calls.lastvalue")
-	require.NoError(t, err)
-
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		calls++
-		checkTestContext(t, ctx)
-		counterObserver.Observe(ctx, calls, attribute.String("A", "B"))
-	})
-	require.NoError(t, err)
+	_ = metric.Must(prov.Meter("named")).NewInt64SumObserver("calls.lastvalue",
+		func(ctx context.Context, result metric.Int64ObserverResult) {
+			calls++
+			checkTestContext(t, ctx)
+			result.Observe(calls, attribute.String("A", "B"))
+		},
+	)
 
 	// Collect() has not been called.  The controller is unstarted.
 	expect := map[string]float64{}
@@ -215,30 +193,27 @@ func TestStartNoExporter(t *testing.T) {
 
 func TestObserverCanceled(t *testing.T) {
 	cont := controller.New(
-		processor.NewFactory(
+		processor.New(
 			processortest.AggregatorSelector(),
-			aggregation.CumulativeTemporalitySelector(),
+			export.CumulativeExportKindSelector(),
 		),
 		controller.WithCollectPeriod(0),
 		controller.WithCollectTimeout(time.Millisecond),
 		controller.WithResource(resource.Empty()),
 	)
-	meter := cont.Meter("go.opentelemetry.io/otel/sdk/metric/controller/basic_test#ObserverCanceled")
 
+	prov := cont.MeterProvider()
 	calls := int64(0)
 
-	counterObserver, err := meter.AsyncInt64().Counter("done.lastvalue")
-	require.NoError(t, err)
-
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		<-ctx.Done()
-		calls++
-		counterObserver.Observe(ctx, calls)
-	})
-	require.NoError(t, err)
-
+	_ = metric.Must(prov.Meter("named")).NewInt64SumObserver("done.lastvalue",
+		func(ctx context.Context, result metric.Int64ObserverResult) {
+			<-ctx.Done()
+			calls++
+			result.Observe(calls)
+		},
+	)
 	// This relies on the context timing out
-	err = cont.Collect(context.Background())
+	err := cont.Collect(context.Background())
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.DeadlineExceeded))
 
@@ -251,25 +226,23 @@ func TestObserverCanceled(t *testing.T) {
 
 func TestObserverContext(t *testing.T) {
 	cont := controller.New(
-		processor.NewFactory(
+		processor.New(
 			processortest.AggregatorSelector(),
-			aggregation.CumulativeTemporalitySelector(),
+			export.CumulativeExportKindSelector(),
 		),
 		controller.WithCollectTimeout(0),
 		controller.WithResource(resource.Empty()),
 	)
-	meter := cont.Meter("go.opentelemetry.io/otel/sdk/metric/controller/basic_test#ObserverContext")
 
-	counterObserver, err := meter.AsyncInt64().Counter("done.lastvalue")
-	require.NoError(t, err)
+	prov := cont.MeterProvider()
 
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		time.Sleep(10 * time.Millisecond)
-		checkTestContext(t, ctx)
-		counterObserver.Observe(ctx, 1)
-	})
-	require.NoError(t, err)
-
+	_ = metric.Must(prov.Meter("named")).NewInt64SumObserver("done.lastvalue",
+		func(ctx context.Context, result metric.Int64ObserverResult) {
+			time.Sleep(10 * time.Millisecond)
+			checkTestContext(t, ctx)
+			result.Observe(1)
+		},
+	)
 	ctx := testContext()
 
 	require.NoError(t, cont.Collect(ctx))
@@ -288,16 +261,16 @@ type blockingExporter struct {
 
 func newBlockingExporter() *blockingExporter {
 	return &blockingExporter{
-		exporter: processortest.New(
-			aggregation.CumulativeTemporalitySelector(),
+		exporter: processortest.NewExporter(
+			export.CumulativeExportKindSelector(),
 			attribute.DefaultEncoder(),
 		),
 	}
 }
 
-func (b *blockingExporter) Export(ctx context.Context, res *resource.Resource, output export.InstrumentationLibraryReader) error {
+func (b *blockingExporter) Export(ctx context.Context, output export.CheckpointSet) error {
 	var err error
-	_ = b.exporter.Export(ctx, res, output)
+	_ = b.exporter.Export(ctx, output)
 	if b.calls == 0 {
 		// timeout once
 		<-ctx.Done()
@@ -307,16 +280,19 @@ func (b *blockingExporter) Export(ctx context.Context, res *resource.Resource, o
 	return err
 }
 
-func (*blockingExporter) TemporalityFor(*sdkapi.Descriptor, aggregation.Kind) aggregation.Temporality {
-	return aggregation.CumulativeTemporality
+func (*blockingExporter) ExportKindFor(
+	*metric.Descriptor,
+	aggregation.Kind,
+) export.ExportKind {
+	return export.CumulativeExportKind
 }
 
 func TestExportTimeout(t *testing.T) {
 	exporter := newBlockingExporter()
 	cont := controller.New(
-		processor.NewFactory(
+		processor.New(
 			processortest.AggregatorSelector(),
-			aggregation.CumulativeTemporalitySelector(),
+			export.CumulativeExportKindSelector(),
 		),
 		controller.WithCollectPeriod(time.Second),
 		controller.WithPushTimeout(time.Millisecond),
@@ -325,17 +301,16 @@ func TestExportTimeout(t *testing.T) {
 	)
 	mock := controllertest.NewMockClock()
 	cont.SetClock(mock)
-	meter := cont.Meter("go.opentelemetry.io/otel/sdk/metric/controller/basic_test#ExportTimeout")
+
+	prov := cont.MeterProvider()
 
 	calls := int64(0)
-	counterObserver, err := meter.AsyncInt64().Counter("one.lastvalue")
-	require.NoError(t, err)
-
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		calls++
-		counterObserver.Observe(ctx, calls)
-	})
-	require.NoError(t, err)
+	_ = metric.Must(prov.Meter("named")).NewInt64SumObserver("one.lastvalue",
+		func(ctx context.Context, result metric.Int64ObserverResult) {
+			calls++
+			result.Observe(calls)
+		},
+	)
 
 	require.NoError(t, cont.Start(context.Background()))
 
@@ -346,7 +321,7 @@ func TestExportTimeout(t *testing.T) {
 	// Collect after 1s, timeout
 	mock.Add(time.Second)
 
-	err = testHandler.Flush()
+	err := testHandler.Flush()
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.DeadlineExceeded))
 
@@ -367,12 +342,12 @@ func TestExportTimeout(t *testing.T) {
 }
 
 func TestCollectAfterStopThenStartAgain(t *testing.T) {
-	exp := processortest.New(
-		aggregation.CumulativeTemporalitySelector(),
+	exp := processortest.NewExporter(
+		export.CumulativeExportKindSelector(),
 		attribute.DefaultEncoder(),
 	)
 	cont := controller.New(
-		processor.NewFactory(
+		processor.New(
 			processortest.AggregatorSelector(),
 			exp,
 		),
@@ -383,17 +358,15 @@ func TestCollectAfterStopThenStartAgain(t *testing.T) {
 	mock := controllertest.NewMockClock()
 	cont.SetClock(mock)
 
-	meter := cont.Meter("go.opentelemetry.io/otel/sdk/metric/controller/basic_test#CollectAfterStopThenStartAgain")
+	prov := cont.MeterProvider()
 
 	calls := 0
-	counterObserver, err := meter.AsyncInt64().Counter("one.lastvalue")
-	require.NoError(t, err)
-
-	err = meter.RegisterCallback([]instrument.Asynchronous{counterObserver}, func(ctx context.Context) {
-		calls++
-		counterObserver.Observe(ctx, int64(calls))
-	})
-	require.NoError(t, err)
+	_ = metric.Must(prov.Meter("named")).NewInt64SumObserver("one.lastvalue",
+		func(ctx context.Context, result metric.Int64ObserverResult) {
+			calls++
+			result.Observe(int64(calls))
+		},
+	)
 
 	// No collections happen (because mock clock does not advance):
 	require.NoError(t, cont.Start(context.Background()))
@@ -421,7 +394,7 @@ func TestCollectAfterStopThenStartAgain(t *testing.T) {
 	// explicit collection should still fail.
 	require.NoError(t, cont.Start(context.Background()))
 	require.True(t, cont.IsRunning())
-	err = cont.Collect(context.Background())
+	err := cont.Collect(context.Background())
 	require.Error(t, err)
 	require.Equal(t, controller.ErrControllerStarted, err)
 
@@ -446,48 +419,5 @@ func TestCollectAfterStopThenStartAgain(t *testing.T) {
 	require.NoError(t, cont.Stop(context.Background()))
 	require.EqualValues(t, map[string]float64{
 		"one.lastvalue//": 6,
-	}, exp.Values())
-}
-
-func TestRegistryFunction(t *testing.T) {
-	exp := processortest.New(
-		aggregation.CumulativeTemporalitySelector(),
-		attribute.DefaultEncoder(),
-	)
-	cont := controller.New(
-		processor.NewFactory(
-			processortest.AggregatorSelector(),
-			exp,
-		),
-		controller.WithCollectPeriod(time.Second),
-		controller.WithExporter(exp),
-		controller.WithResource(resource.Empty()),
-	)
-
-	m1 := cont.Meter("test")
-	m2 := cont.Meter("test")
-
-	require.NotNil(t, m1)
-	require.Equal(t, m1, m2)
-
-	c1, err := m1.SyncInt64().Counter("counter.sum")
-	require.NoError(t, err)
-
-	c2, err := m1.SyncInt64().Counter("counter.sum")
-	require.NoError(t, err)
-
-	require.Equal(t, c1, c2)
-
-	ctx := context.Background()
-
-	require.NoError(t, cont.Start(ctx))
-
-	c1.Add(ctx, 10)
-	c2.Add(ctx, 10)
-
-	require.NoError(t, cont.Stop(ctx))
-
-	require.EqualValues(t, map[string]float64{
-		"counter.sum//": 20,
 	}, exp.Values())
 }

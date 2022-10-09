@@ -12,22 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package global
+package global_test
 
 import (
 	"context"
 	"testing"
 
-	"go.opentelemetry.io/otel/internal/internaltest"
+	"go.opentelemetry.io/otel/internal/global"
+	"go.opentelemetry.io/otel/oteltest"
 )
 
 func TestTextMapPropagatorDelegation(t *testing.T) {
-	ResetForTest(t)
+	global.ResetForTest()
 	ctx := context.Background()
-	carrier := internaltest.NewTextMapCarrier(nil)
+	carrier := oteltest.NewTextMapCarrier(nil)
 
 	// The default should be a noop.
-	initial := TextMapPropagator()
+	initial := global.TextMapPropagator()
 	initial.Inject(ctx, carrier)
 	ctx = initial.Extract(ctx, carrier)
 	if !carrier.GotN(t, 0) || !carrier.SetN(t, 0) {
@@ -35,7 +36,7 @@ func TestTextMapPropagatorDelegation(t *testing.T) {
 	}
 
 	// Make sure the delegate woks as expected.
-	delegate := internaltest.NewTextMapPropagator("test")
+	delegate := oteltest.NewTextMapPropagator("test")
 	delegate.Inject(ctx, carrier)
 	ctx = delegate.Extract(ctx, carrier)
 	if !delegate.InjectedN(t, carrier, 1) || !delegate.ExtractedN(t, ctx, 1) {
@@ -44,7 +45,7 @@ func TestTextMapPropagatorDelegation(t *testing.T) {
 
 	// The initial propagator should use the delegate after it is set as the
 	// global.
-	SetTextMapPropagator(delegate)
+	global.SetTextMapPropagator(delegate)
 	initial.Inject(ctx, carrier)
 	ctx = initial.Extract(ctx, carrier)
 	delegate.InjectedN(t, carrier, 2)
@@ -52,12 +53,12 @@ func TestTextMapPropagatorDelegation(t *testing.T) {
 }
 
 func TestTextMapPropagatorDelegationNil(t *testing.T) {
-	ResetForTest(t)
+	global.ResetForTest()
 	ctx := context.Background()
-	carrier := internaltest.NewTextMapCarrier(nil)
+	carrier := oteltest.NewTextMapCarrier(nil)
 
 	// The default should be a noop.
-	initial := TextMapPropagator()
+	initial := global.TextMapPropagator()
 	initial.Inject(ctx, carrier)
 	ctx = initial.Extract(ctx, carrier)
 	if !carrier.GotN(t, 0) || !carrier.SetN(t, 0) {
@@ -65,7 +66,7 @@ func TestTextMapPropagatorDelegationNil(t *testing.T) {
 	}
 
 	// Delegation to nil should not make a change.
-	SetTextMapPropagator(nil)
+	global.SetTextMapPropagator(nil)
 	initial.Inject(ctx, carrier)
 	initial.Extract(ctx, carrier)
 	if !carrier.GotN(t, 0) || !carrier.SetN(t, 0) {
@@ -74,22 +75,22 @@ func TestTextMapPropagatorDelegationNil(t *testing.T) {
 }
 
 func TestTextMapPropagatorFields(t *testing.T) {
-	ResetForTest(t)
-	initial := TextMapPropagator()
-	delegate := internaltest.NewTextMapPropagator("test")
+	global.ResetForTest()
+	initial := global.TextMapPropagator()
+	delegate := oteltest.NewTextMapPropagator("test")
 	delegateFields := delegate.Fields()
 
 	// Sanity check on the initial Fields.
 	if got := initial.Fields(); fieldsEqual(got, delegateFields) {
 		t.Fatalf("testing fields (%v) matched Noop fields (%v)", delegateFields, got)
 	}
-	SetTextMapPropagator(delegate)
+	global.SetTextMapPropagator(delegate)
 	// Check previous returns from global not correctly delegate.
 	if got := initial.Fields(); !fieldsEqual(got, delegateFields) {
 		t.Errorf("global TextMapPropagator.Fields returned %v instead of delegating, want (%v)", got, delegateFields)
 	}
 	// Check new calls to global.
-	if got := TextMapPropagator().Fields(); !fieldsEqual(got, delegateFields) {
+	if got := global.TextMapPropagator().Fields(); !fieldsEqual(got, delegateFields) {
 		t.Errorf("global TextMapPropagator.Fields returned %v, want (%v)", got, delegateFields)
 	}
 }
